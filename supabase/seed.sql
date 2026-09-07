@@ -1,9 +1,42 @@
 -- MEHRAÉ seed data
 -- Realistic catalogue built from the ACTUAL supplied images in public/products/.
 -- Safe to re-run: uses ON CONFLICT DO NOTHING / DO UPDATE throughout.
+--
+-- IMPORTANT - run this file with a tool that reads it directly, e.g.:
+--   supabase db execute -f supabase/seed.sql
+--   psql "$SUPABASE_DB_URL" -f supabase/seed.sql
+-- Avoid pasting a file this size into the Supabase Dashboard's SQL Editor
+-- text box: large multi-statement pastes are the most common way a stray
+-- quote/keyword ends up truncated mid-string, which Postgres will then
+-- report as a confusing downstream parse error (e.g. a "relation ... does
+-- not exist" pointing at a word that only ever appears inside a quoted
+-- string literal below, never as an actual table reference).
+
+begin;
+
+-- Preflight: fail fast with a clear message if the schema migrations
+-- haven't been applied yet, instead of a confusing mid-script error.
+do $$
+begin
+  if to_regclass('public.categories') is null then
+    raise exception 'Table public.categories does not exist - run supabase/migrations/0001_schema.sql (and 0002-0005) before seeding.';
+  end if;
+  if to_regclass('public.products') is null then
+    raise exception 'Table public.products does not exist - run supabase/migrations/0001_schema.sql (and 0002-0005) before seeding.';
+  end if;
+  if to_regclass('public.product_images') is null then
+    raise exception 'Table public.product_images does not exist - run supabase/migrations/0001_schema.sql (and 0002-0005) before seeding.';
+  end if;
+  if to_regclass('public.product_variants') is null then
+    raise exception 'Table public.product_variants does not exist - run supabase/migrations/0001_schema.sql (and 0002-0005) before seeding.';
+  end if;
+  if to_regclass('public.coupons') is null then
+    raise exception 'Table public.coupons does not exist - run supabase/migrations/0001_schema.sql (and 0002-0005) before seeding.';
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------------
--- categories
+-- categories (inserted first - products.category_id depends on these)
 -- ---------------------------------------------------------------------------
 insert into public.categories (name, slug, description) values ('Sarees', 'sarees', 'Handloom and silk sarees blending heritage weaves with contemporary draping.') on conflict (slug) do update set name = excluded.name, description = excluded.description;
 insert into public.categories (name, slug, description) values ('Lehengas', 'lehengas', 'Bridal and festive lehengas with hand embroidery and heirloom detailing.') on conflict (slug) do update set name = excluded.name, description = excluded.description;
@@ -536,3 +569,24 @@ insert into public.coupons (code, discount_type, discount_value, minimum_order_a
 values ('FESTIVE500', 'fixed', 500, 5000, null, true, null)
 on conflict (code) do update set discount_type = excluded.discount_type, discount_value = excluded.discount_value,
   minimum_order_amount = excluded.minimum_order_amount, max_discount = excluded.max_discount, active = excluded.active;
+
+-- Post-seed sanity check: fail the whole transaction (nothing partially
+-- committed) if the catalogue didn't end up in the expected shape, rather
+-- than silently leaving an incomplete seed in place.
+do $$
+declare
+  v_categories int;
+  v_products int;
+begin
+  select count(*) into v_categories from public.categories;
+  select count(*) into v_products from public.products;
+
+  if v_categories < 4 then
+    raise exception 'Seed sanity check failed: expected at least 4 categories, found %', v_categories;
+  end if;
+  if v_products < 16 then
+    raise exception 'Seed sanity check failed: expected at least 16 products, found %', v_products;
+  end if;
+end $$;
+
+commit;
