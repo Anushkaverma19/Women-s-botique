@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+:root {
+  /* MEHRAÉ palette */
+  --color-ivory: #faf6ee;
+  --color-parchment: #f2e9d8;
+  --color-burgundy: #6e1f2b;
+  --color-burgundy-deep: #4a1219;
+  --color-gold: #b08d47;
+  --color-gold-soft: #d9c08f;
+  --color-emerald: #1f3b32;
+  --color-blush: #eddcd6;
+  --color-charcoal: #23201d;
+
+  --background: var(--color-ivory);
+  --foreground: var(--color-charcoal);
+
+  --font-display: "Cormorant Garamond", "Playfair Display", Georgia, "Times New Roman", serif;
+  --font-sans: "Jost", "Manrope", "Helvetica Neue", Arial, sans-serif;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-ivory: var(--color-ivory);
+  --color-parchment: var(--color-parchment);
+  --color-burgundy: var(--color-burgundy);
+  --color-burgundy-deep: var(--color-burgundy-deep);
+  --color-gold: var(--color-gold);
+  --color-gold-soft: var(--color-gold-soft);
+  --color-emerald: var(--color-emerald);
+  --color-blush: var(--color-blush);
+  --color-charcoal: var(--color-charcoal);
+
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4,
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.eyebrow {
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.28em;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.hairline {
+  border-top: 1px solid color-mix(in srgb, var(--color-charcoal) 15%, transparent);
+}
+
+.gold-underline {
+  position: relative;
+}
+.gold-underline::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -6px;
+  width: 42px;
+  height: 1px;
+  background: var(--color-gold);
+}
+
+::selection {
+  background: var(--color-gold-soft);
+  color: var(--color-charcoal);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-burgundy);
+  outline-offset: 3px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--color-ivory);
+  color: var(--color-charcoal);
+  padding: 0.75rem 1.25rem;
+  z-index: 100;
+  border: 1px solid var(--color-charcoal);
+}
+.skip-link:focus {
+  left: 1rem;
+  top: 1rem;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
