@@ -3,14 +3,19 @@
 -- Safe to re-run: uses ON CONFLICT DO NOTHING / DO UPDATE throughout.
 --
 -- IMPORTANT - run this file with a tool that reads it directly, e.g.:
---   supabase db execute -f supabase/seed.sql
---   psql "$SUPABASE_DB_URL" -f supabase/seed.sql
+--   supabase db query --db-url "postgresql://postgres:[PASSWORD]@db.<project-ref>.supabase.co:5432/postgres" -f supabase/seed.sql
+--   supabase db query --linked -f supabase/seed.sql   (if the project is already linked)
+--   psql "postgresql://postgres:[PASSWORD]@db.<project-ref>.supabase.co:5432/postgres" -f supabase/seed.sql
 -- Avoid pasting a file this size into the Supabase Dashboard's SQL Editor
 -- text box: large multi-statement pastes are the most common way a stray
 -- quote/keyword ends up truncated mid-string, which Postgres will then
 -- report as a confusing downstream parse error (e.g. a "relation ... does
 -- not exist" pointing at a word that only ever appears inside a quoted
--- string literal below, never as an actual table reference).
+-- string literal below, never as an actual table reference). If you have
+-- already run this file in the Dashboard SQL Editor before, note that the
+-- editor does NOT reload from disk/git automatically - re-select-all and
+-- re-paste the current file content before re-running, or use one of the
+-- commands above instead, which read the file fresh every time.
 
 begin;
 

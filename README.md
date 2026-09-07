@@ -119,7 +119,18 @@ The app is written to fail gracefully (not crash the whole site) if these are un
    ```
    supabase/seed.sql
    ```
-   Run it the same way (SQL editor, or `psql "$SUPABASE_DB_URL" -f supabase/seed.sql`).
+   **Run this via the CLI or `psql`, not by pasting into the Dashboard SQL Editor.** The file is ~570 lines; large pastes into the Dashboard editor are the most common way a quote gets truncated mid-paste, which then surfaces as a confusing unrelated parse error further down the file. Also note the Dashboard editor does not reload from disk/git - if you previously pasted an older copy into a saved query tab, re-select-all and re-paste the current file content before running it again.
+
+   Using the Supabase CLI (get your project ref from the Dashboard URL or `supabase projects list`):
+   ```bash
+   supabase link --project-ref <your-project-ref>
+   supabase db query --linked -f supabase/seed.sql
+   ```
+   Or directly with `psql`, using the connection string from **Project Settings → Database → Connection string** (URI format):
+   ```bash
+   psql "postgresql://postgres:[PASSWORD]@db.<your-project-ref>.supabase.co:5432/postgres" -f supabase/seed.sql
+   ```
+   The seed is wrapped in a single transaction with a preflight check (fails fast with a clear message if migrations haven't been run yet) and a post-seed sanity check, and is safe to run more than once - it upserts by slug/SKU/code rather than duplicating rows.
 4. Copy your project's URL and keys into `.env.local` as above.
 
 ### Admin Setup
