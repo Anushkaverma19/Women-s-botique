@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { loginSchema } from "@/lib/validations/schemas";
@@ -10,7 +10,6 @@ import { Input, Label, FieldError } from "@/components/ui/field";
 import { Button } from "@/components/ui/button";
 
 export default function LoginPage() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -44,9 +43,17 @@ export default function LoginPage() {
       return;
     }
 
+    // A hard navigation (not router.push + router.refresh) is used
+    // deliberately here: Navbar and /account are Server Components that
+    // read the session from cookies on the server. router.push/refresh can
+    // race with the Supabase browser client finishing its cookie write, or
+    // serve an already-cached client-router payload for the destination
+    // route (e.g. if it was prefetched while logged out) - both of which
+    // showed up as "stuck on the login page" / a stale logged-out navbar,
+    // especially on mobile browsers. A full navigation always re-requests
+    // the page from the server with the fresh session cookie attached.
     const redirectTo = searchParams.get("redirectTo") || "/account";
-    router.push(redirectTo);
-    router.refresh();
+    window.location.href = redirectTo;
   }
 
   return (

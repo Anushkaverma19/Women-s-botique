@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { signUpSchema } from "@/lib/validations/schemas";
@@ -10,13 +9,13 @@ import { Input, Label, FieldError } from "@/components/ui/field";
 import { Button } from "@/components/ui/button";
 
 export default function SignUpPage() {
-  const router = useRouter();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [checkEmail, setCheckEmail] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -36,7 +35,7 @@ export default function SignUpPage() {
 
     setLoading(true);
     const supabase = createClient();
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email: parsed.data.email,
       password: parsed.data.password,
       options: { data: { full_name: parsed.data.fullName } },
@@ -44,12 +43,46 @@ export default function SignUpPage() {
     setLoading(false);
 
     if (error) {
-      setFormError(error.message.includes("already registered") ? "An account with this email already exists." : "Could not create your account. Please try again.");
+      setFormError(
+        error.message.includes("already registered")
+          ? "An account with this email already exists."
+          : "Could not create your account. Please try again."
+      );
       return;
     }
 
-    router.push("/account");
-    router.refresh();
+    if (!data.session) {
+      // Email confirmation is required by this Supabase project - there is
+      // no active session yet, so redirecting to /account would just bounce
+      // straight back to /login. Show a clear next step instead.
+      setCheckEmail(true);
+      return;
+    }
+
+    // Hard navigation, not router.push + router.refresh: Navbar and
+    // /account are Server Components that read the session from cookies on
+    // the server, and a client-router transition can race with the cookie
+    // write or serve an already-cached payload for the destination route -
+    // both showed up as a stale/logged-out navbar, especially on mobile.
+    // A full navigation always re-requests the page with the fresh cookie.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- intentional hard navigation, see comment above
+    window.location.href = "/account";
+  }
+
+  if (checkEmail) {
+    return (
+      <Container className="py-16 max-w-md text-center">
+        <h1 className="font-display text-4xl mb-4">Check your email</h1>
+        <p className="text-charcoal/60 text-sm leading-relaxed">
+          We&apos;ve sent a confirmation link to <span className="text-charcoal">{email}</span>. Open it to
+          activate your account, then{" "}
+          <Link href="/login" className="text-charcoal underline underline-offset-4">
+            sign in
+          </Link>
+          .
+        </p>
+      </Container>
+    );
   }
 
   return (

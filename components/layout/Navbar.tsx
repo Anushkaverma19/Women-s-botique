@@ -24,10 +24,10 @@ export async function Navbar() {
       <a href="#main-content" className="skip-link">
         Skip to content
       </a>
-      <div className="mx-auto max-w-[1400px] px-5 sm:px-8 lg:px-12 h-20 flex items-center justify-between">
-        <div className="flex items-center gap-10">
+      <div className="mx-auto max-w-[1400px] px-4 sm:px-8 lg:px-12 h-20 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 sm:gap-6 lg:gap-10 min-w-0">
           <MobileMenu isLoggedIn={isLoggedIn} isAdmin={isAdmin} />
-          <Link href="/" className="font-display text-2xl sm:text-3xl tracking-wide">
+          <Link href="/" className="font-display text-xl sm:text-2xl lg:text-3xl tracking-wide truncate">
             MEHRAÉ
           </Link>
         </div>
@@ -40,7 +40,7 @@ export async function Navbar() {
           ))}
         </nav>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 sm:gap-4 shrink-0">
           <SearchOverlay />
           <Link
             href={isLoggedIn ? "/account" : "/login"}
