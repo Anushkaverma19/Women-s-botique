@@ -235,5 +235,26 @@ If `GEMINI_API_KEY` is not set, the endpoint still returns real, retrieved produ
 4. Deploy. Next.js's App Router, Route Handlers and Server Components all run natively on Vercel with no extra configuration.
 
 ## Demo Accounts
+## Demo Admin Account
+
+A pre-provisioned demo admin account is available for recruiter/evaluator testing.
+
+**Admin login**
+
+* **Email:** `demo@mehrae.com`
+* **Password:** `MehraeDemo@2026`
+* **Admin dashboard:** `/admin`
+
+### Recruiter Test Flow
+
+1. Open the deployed MEHRAÉ website.
+2. Go to `/login`.
+3. Sign in using the demo admin credentials above.
+4. Open `/admin` from the navbar or directly visit `/admin`.
+5. Test the admin dashboard, product management, inventory and order management.
+
+For the customer experience, use `/signup` to create a separate customer account and test the storefront, cart, checkout and order history.
+
+> **Note:** These credentials are intentionally provided as a demo/evaluation account. They are not application secrets and do not grant access to the Supabase project itself.
 
 No credentials are hardcoded anywhere in this repository. Create your own account at `/signup`, and promote it to admin using the SQL command in **Admin Setup** above.
