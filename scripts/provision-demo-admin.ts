@@ -56,7 +56,7 @@ async function findUserByEmail(email: string) {
 async function main() {
   console.log("Provisioning MEHRAÉ demo admin...");
 
-  let user = await findUserByEmail(demoEmail);
+let user = await findUserByEmail(demoEmail!);
 
   if (!user) {
     console.log("Demo admin does not exist. Creating Auth user...");
