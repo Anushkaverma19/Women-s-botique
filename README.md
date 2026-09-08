@@ -26,7 +26,7 @@ This is a full, working application - not a mockup. Every page reads from and wr
 **Accounts & Admin**
 - Supabase Auth (email/password), with `customer` and `admin` roles
 - Row Level Security on every table: customers can only ever see their own cart/orders/profile; admin writes require a verified `admin` role checked server-side, never a client-supplied flag
-- Admin console (visually distinct from the storefront): dashboard (orders, revenue, low-stock SKUs), product CRUD, variant/inventory management, order list with status updates
+- Admin console (visually distinct from the storefront): dashboard (orders, revenue, low-stock SKUs), product CRUD, image management, variant/inventory management, order list + order detail with status updates
 
 **ASK MEHRAÉ (AI Shopping Assistant)**
 - Floating concierge on desktop, full-drawer on mobile
@@ -145,6 +145,27 @@ There is deliberately **no way to become an admin from the browser** - a signed-
 3. Sign out and back in. You'll now see an **Admin** link in the navbar and can reach `/admin`.
 
 `promote_to_admin` is only executable by the `service_role` - it cannot be called from the authenticated/anon roles the app uses, so this can't be triggered by a client request.
+
+### Admin Dashboard
+
+Once your account is promoted (above), sign in and open `/admin` (also linked from the navbar and `/account` for admins).
+
+**Authorization is enforced in three independent layers**, all server-side, none trusting anything the browser sends:
+1. `proxy.ts` (middleware) looks up the caller's real session and their `profiles.role` row before allowing `/admin/*` to load at all; anyone else is redirected.
+2. `app/admin/layout.tsx` re-checks the same thing itself, so it isn't relying solely on the middleware config.
+3. Every `/api/admin/*` route calls `requireAdmin()`, which looks up the role fresh from the database using the verified session - never a client-supplied field - and only then uses the service-role client to write.
+
+A signed-up customer account cannot reach any admin page or admin API, regardless of what it sends.
+
+**What you can do from the dashboard:**
+| Area | Route | Capabilities |
+|---|---|---|
+| Overview | `/admin` | Order count, revenue, active product count, low-stock count, recent orders |
+| Products | `/admin/products` → `/admin/products/[id]` | Create, edit, activate/deactivate; manage images (add/remove/edit alt text - references files already in `public/`, no upload feature); manage variants (add SKU/color/size, edit price/stock, activate/deactivate) |
+| Orders | `/admin/orders` → `/admin/orders/[id]` | Full order detail (customer, shipping address, line items, totals) with a status dropdown (Pending → Confirmed → Processing → Shipped → Delivered, or Cancelled) |
+| Inventory | `/admin/inventory` | SKUs at 3 units or fewer, linking straight to that product's edit page |
+
+**To test it:** promote your own account, sign in, place a test order as that same account (or a second test account) using a simulated payment, then confirm it appears in `/admin/orders` and that its status can be updated from there.
 
 ---
 

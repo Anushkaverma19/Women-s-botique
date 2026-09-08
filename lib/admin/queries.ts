@@ -75,7 +75,7 @@ export async function listLowStockVariants() {
   const supabase = await createClient();
   const { data } = await supabase
     .from("product_variants")
-    .select("*, product:products(name, slug)")
+    .select("*, product:products(id, name, slug)")
     .eq("active", true)
     .lte("stock_quantity", LOW_STOCK_THRESHOLD)
     .order("stock_quantity", { ascending: true });

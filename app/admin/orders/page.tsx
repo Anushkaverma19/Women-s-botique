@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { listAllOrdersForAdmin } from "@/lib/admin/queries";
 import { formatINR, formatDate } from "@/lib/utils";
 import { OrderStatusSelect } from "@/components/admin/OrderStatusSelect";
@@ -25,7 +26,11 @@ export default async function AdminOrdersPage() {
           <tbody>
             {orders.map((order) => (
               <tr key={order.id} className="border-t border-black/5">
-                <td className="px-5 py-3">{order.order_number}</td>
+                <td className="px-5 py-3">
+                  <Link href={`/admin/orders/${order.id}`} className="text-black hover:underline">
+                    {order.order_number}
+                  </Link>
+                </td>
                 <td className="px-5 py-3 text-black/60">
                   <div>{order.customer_name}</div>
                   <div className="text-xs text-black/40">{order.customer_email}</div>

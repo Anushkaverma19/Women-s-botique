@@ -9,7 +9,7 @@ interface LowStockRow {
   color: string;
   size: string;
   stock_quantity: number;
-  product: { name: string; slug: string } | { name: string; slug: string }[] | null;
+  product: { id: string; name: string; slug: string } | { id: string; name: string; slug: string }[] | null;
 }
 
 export default async function AdminInventoryPage() {
@@ -48,7 +48,7 @@ export default async function AdminInventoryPage() {
                   </td>
                   <td className="px-5 py-3 text-right">
                     {product ? (
-                      <Link href={`/admin/products?highlight=${product.slug}`} className="text-xs text-black/50 hover:text-black">
+                      <Link href={`/admin/products/${product.id}`} className="text-xs text-black/50 hover:text-black">
                         Manage
                       </Link>
                     ) : null}

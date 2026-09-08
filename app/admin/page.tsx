@@ -43,7 +43,7 @@ export default async function AdminDashboardPage() {
             {stats.recentOrders.map((order) => (
               <tr key={order.id} className="border-t border-black/5 hover:bg-black/[0.02]">
                 <td className="px-5 py-3">
-                  <Link href={`/admin/orders`} className="text-black hover:underline">
+                  <Link href={`/admin/orders/${order.id}`} className="text-black hover:underline">
                     {order.order_number}
                   </Link>
                 </td>
