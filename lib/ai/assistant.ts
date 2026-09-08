@@ -72,7 +72,13 @@ export async function askMehrae(message: string, history: ChatTurn[]): Promise<A
   const context = candidates.map(toAiContext);
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.0-flash",
+    // NOTE: gemini-2.0-flash was fully shut down by Google on 2026-06-01.
+    // gemini-2.5-flash is the current active replacement as of this
+    // writing, but it also has a published (non-earlier-than) retirement
+    // date of 2026-10-16 - if this project is still running after that,
+    // check https://ai.google.dev/gemini-api/docs/deprecations and update
+    // this string before assuming the AI assistant is broken.
+    model: "gemini-2.5-flash",
     generationConfig: { responseMimeType: "application/json" },
     systemInstruction: ASK_MEHRAE_SYSTEM_PROMPT,
   });
