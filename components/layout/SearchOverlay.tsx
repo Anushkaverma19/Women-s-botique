@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { Search, X } from "lucide-react";
 import { formatINR } from "@/lib/utils";
 import { useRouter } from "next/navigation";
+import { useOverlayEffects } from "@/lib/hooks/useOverlayEffects";
 
 interface QuickResult {
   id: string;
@@ -23,6 +24,9 @@ export function SearchOverlay() {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  const close = useCallback(() => setOpen(false), []);
+  useOverlayEffects(open, close);
 
   useEffect(() => {
     if (open) inputRef.current?.focus();

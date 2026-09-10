@@ -42,7 +42,27 @@ export default async function AdminLayout({ children }: { children: React.ReactN
             <p className="text-white/80 mt-1 truncate">{profile.email}</p>
           </div>
         </aside>
-        <main className="flex-1 min-w-0 px-6 py-8 md:px-10 md:py-10">{children}</main>
+        <div className="flex-1 min-w-0 flex flex-col">
+          {/* The sidebar above is desktop-only (hidden md:block); without
+              this, admins on a phone had no way at all to reach Products,
+              Orders, or Inventory. Sticky horizontal tab strip, not the
+              desktop sidebar shrunk down. */}
+          <nav
+            aria-label="Admin navigation"
+            className="md:hidden sticky top-20 z-20 flex items-center gap-1 overflow-x-auto no-scrollbar bg-[#1a1a1a] text-white/90 px-3 py-2"
+          >
+            {NAV.map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                className="shrink-0 eyebrow px-3 py-2 rounded hover:bg-white/10 transition-colors whitespace-nowrap"
+              >
+                {item.label}
+              </Link>
+            ))}
+          </nav>
+          <main className="flex-1 min-w-0 px-6 py-8 md:px-10 md:py-10">{children}</main>
+        </div>
       </div>
     </div>
   );
