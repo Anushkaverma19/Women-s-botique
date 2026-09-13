@@ -1,0 +1,349 @@
+[1mdiff --git a/app/api/ai/route.ts b/app/api/ai/route.ts[m
+[1mindex 42508de..943f3cd 100644[m
+[1m--- a/app/api/ai/route.ts[m
+[1m+++ b/app/api/ai/route.ts[m
+[36m@@ -2,8 +2,17 @@[m [mimport { NextResponse } from "next/server";[m
+ import { aiChatSchema } from "@/lib/validations/schemas";[m
+ import { askMehrae } from "@/lib/ai/assistant";[m
+ import { handleApiError } from "@/lib/api-response";[m
+[32m+[m[32mimport { rateLimit, getClientIp } from "@/lib/rate-limit";[m
+ import type { ProductWithRelations } from "@/types/database";[m
+ [m
+[32m+[m[32m// The Gemini-backed chatbot is the most expensive and quota-limited[m
+[32m+[m[32m// endpoint in the app, so it gets its own (tighter) limit rather than[m
+[32m+[m[32m// relying only on the general middleware limit: 12 messages/minute per[m
+[32m+[m[32m// client is generous for a real conversation but blocks scripted abuse[m
+[32m+[m[32m// that would otherwise burn through the shared Gemini quota for everyone.[m
+[32m+[m[32mconst AI_LIMIT = 12;[m
+[32m+[m[32mconst AI_WINDOW_SECONDS = 60;[m
+[32m+[m
+ function toClientProduct(product: ProductWithRelations) {[m
+   // Trim to exactly what the UI needs - no internal fields, nothing Gemini[m
+   // could have injected (this object is built entirely from `product`,[m
+[36m@@ -22,6 +31,15 @@[m [mfunction toClientProduct(product: ProductWithRelations) {[m
+ [m
+ export async function POST(request: Request) {[m
+   try {[m
+[32m+[m[32m    const ip = getClientIp(request);[m
+[32m+[m[32m    const { success, retryAfter } = await rateLimit(`ai:${ip}`, AI_LIMIT, AI_WINDOW_SECONDS);[m
+[32m+[m[32m    if (!success) {[m
+[32m+[m[32m      return NextResponse.json([m
+[32m+[m[32m        { error: "ASK MEHRAÉ is getting a lot of messages right now - please wait a moment and try again." },[m
+[32m+[m[32m        { status: 429, headers: { "Retry-After": String(retryAfter) } }[m
+[32m+[m[32m      );[m
+[32m+[m[32m    }[m
+[32m+[m
+     const body = aiChatSchema.parse(await request.json());[m
+     const result = await askMehrae(body.message, body.history);[m
+ [m
+[1mdiff --git a/app/api/products/occasion/route.ts b/app/api/products/occasion/route.ts[m
+[1mindex b9f54e4..4229c0e 100644[m
+[1m--- a/app/api/products/occasion/route.ts[m
+[1m+++ b/app/api/products/occasion/route.ts[m
+[36m@@ -11,17 +11,24 @@[m [mexport async function GET(request: Request) {[m
+     const { searchParams } = new URL(request.url);[m
+     const { occasion } = schema.parse({ occasion: searchParams.get("occasion") });[m
+     const products = await getProductsByOccasion(occasion, 8);[m
+[31m-    return NextResponse.json({[m
+[31m-      products: products.map((p) => ({[m
+[31m-        id: p.id,[m
+[31m-        slug: p.slug,[m
+[31m-        name: p.name,[m
+[31m-        basePrice: p.base_price,[m
+[31m-        compareAtPrice: p.compare_at_price,[m
+[31m-        image: p.images[0]?.image_url ?? null,[m
+[31m-        inStock: p.variants.some((v) => v.active && v.stock_quantity > 0),[m
+[31m-      })),[m
+[31m-    });[m
+[32m+[m[32m    return NextResponse.json([m
+[32m+[m[32m      {[m
+[32m+[m[32m        products: products.map((p) => ({[m
+[32m+[m[32m          id: p.id,[m
+[32m+[m[32m          slug: p.slug,[m
+[32m+[m[32m          name: p.name,[m
+[32m+[m[32m          basePrice: p.base_price,[m
+[32m+[m[32m          compareAtPrice: p.compare_at_price,[m
+[32m+[m[32m          image: p.images[0]?.image_url ?? null,[m
+[32m+[m[32m          inStock: p.variants.some((v) => v.active && v.stock_quantity > 0),[m
+[32m+[m[32m        })),[m
+[32m+[m[32m      },[m
+[32m+[m[32m      {[m
+[32m+[m[32m        // Public, non-personalised catalogue data - same reasoning as[m
+[32m+[m[32m        // /api/products/search.[m
+[32m+[m[32m        headers: { "Cache-Control": "public, s-maxage=30, stale-while-revalidate=120" },[m
+[32m+[m[32m      }[m
+[32m+[m[32m    );[m
+   } catch (error) {[m
+     return handleApiError(error);[m
+   }[m
+[1mdiff --git a/app/api/products/search/route.ts b/app/api/products/search/route.ts[m
+[1mindex 3ce48a3..ce70bb0 100644[m
+[1m--- a/app/api/products/search/route.ts[m
+[1m+++ b/app/api/products/search/route.ts[m
+[36m@@ -18,7 +18,17 @@[m [mexport async function GET(request: Request) {[m
+       image: p.images[0]?.image_url ?? null,[m
+       inStock: p.variants.some((v) => v.active && v.stock_quantity > 0),[m
+     }));[m
+[31m-    return NextResponse.json({ products: trimmed });[m
+[32m+[m[32m    return NextResponse.json([m
+[32m+[m[32m      { products: trimmed },[m
+[32m+[m[32m      {[m
+[32m+[m[32m        // Public, non-personalised catalogue data: safe to cache briefly at[m
+[32m+[m[32m        // the CDN edge. stale-while-revalidate means most repeat searches[m
+[32m+[m[32m        // (very common with a live-typing search box) are served instantly[m
+[32m+[m[32m        // from cache instead of hitting Supabase on every keystroke, which[m
+[32m+[m[32m        // matters a lot at ~10k concurrent users.[m
+[32m+[m[32m        headers: { "Cache-Control": "public, s-maxage=30, stale-while-revalidate=120" },[m
+[32m+[m[32m      }[m
+[32m+[m[32m    );[m
+   } catch (error) {[m
+     return handleApiError(error);[m
+   }[m
+[1mdiff --git a/lib/ai/assistant.ts b/lib/ai/assistant.ts[m
+[1mindex 4f975cf..982e993 100644[m
+[1m--- a/lib/ai/assistant.ts[m
+[1m+++ b/lib/ai/assistant.ts[m
+[36m@@ -15,11 +15,89 @@[m [mexport interface AskMehraeResult {[m
+ const FALLBACK_MESSAGE =[m
+   "I couldn't find a piece matching that request in the current collection.";[m
+ [m
+[32m+[m[32mconst QUOTA_FALLBACK_MESSAGE =[m
+[32m+[m[32m  "Our styling assistant is in high demand right now, so I can't add personal notes just yet - but here are real pieces from the collection that match what you asked for.";[m
+[32m+[m
+[32m+[m[32mconst GENERIC_ERROR_FALLBACK_MESSAGE =[m
+[32m+[m[32m  "I'm having trouble reaching the styling assistant right now - here are a few pieces that might suit you.";[m
+[32m+[m
+ interface ChatTurn {[m
+   role: "user" | "assistant";[m
+   content: string;[m
+ }[m
+ [m
+[32m+[m[32m/**[m
+[32m+[m[32m * Process-local circuit breaker for Gemini quota exhaustion.[m
+[32m+[m[32m *[m
+[32m+[m[32m * When Gemini returns a 429/RESOURCE_EXHAUSTED, we already know every other[m
+[32m+[m[32m * concurrent request in this process is about to hit the same wall - so[m
+[32m+[m[32m * instead of making each of them pay the latency of a doomed API call (and[m
+[32m+[m[32m * counting further against the quota once it partially recovers), we short[m
+[32m+[m[32m * -circuit straight to the catalogue-only fallback for a cooldown window.[m
+[32m+[m[32m *[m
+[32m+[m[32m * This is per-instance state, same caveat as the in-memory rate limiter in[m
+[32m+[m[32m * lib/rate-limit.ts: on a single server it's exactly right, on many[m
+[32m+[m[32m * serverless instances each instance discovers the outage independently[m
+[32m+[m[32m * (slightly less efficient, but never incorrect - worst case is a few[m
+[32m+[m[32m * redundant calls across instances, not a crash).[m
+[32m+[m[32m */[m
+[32m+[m[32mconst QUOTA_COOLDOWN_MS = 30_000;[m
+[32m+[m[32mlet quotaExceededUntil = 0;[m
+[32m+[m
+[32m+[m[32mfunction isQuotaError(err: unknown): boolean {[m
+[32m+[m[32m  const message = err instanceof Error ? err.message : String(err);[m
+[32m+[m[32m  return ([m
+[32m+[m[32m    message.includes("429") ||[m
+[32m+[m[32m    message.includes("RESOURCE_EXHAUSTED") ||[m
+[32m+[m[32m    message.toLowerCase().includes("quota")[m
+[32m+[m[32m  );[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunction isRetryableError(err: unknown): boolean {[m
+[32m+[m[32m  const message = err instanceof Error ? err.message : String(err);[m
+[32m+[m[32m  // Transient server-side / network issues are worth a quick retry.[m
+[32m+[m[32m  // Quota errors and 4xx client errors (bad request, invalid key, etc.)[m
+[32m+[m[32m  // are not - retrying them immediately just wastes time and quota.[m
+[32m+[m[32m  return ([m
+[32m+[m[32m    message.includes("500") ||[m
+[32m+[m[32m    message.includes("503") ||[m
+[32m+[m[32m    message.includes("fetch failed") ||[m
+[32m+[m[32m    message.toLowerCase().includes("timeout") ||[m
+[32m+[m[32m    message.toLowerCase().includes("network")[m
+[32m+[m[32m  );[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunction sleep(ms: number) {[m
+[32m+[m[32m  return new Promise((resolve) => setTimeout(resolve, ms));[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m/** Calls Gemini with a couple of short, backed-off retries for transient errors only. */[m
+[32m+[m[32masync function generateWithRetry([m
+[32m+[m[32m  model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,[m
+[32m+[m[32m  prompt: string,[m
+[32m+[m[32m  maxAttempts = 3[m
+[32m+[m[32m): Promise<string> {[m
+[32m+[m[32m  let lastError: unknown;[m
+[32m+[m[32m  for (let attempt = 0; attempt < maxAttempts; attempt++) {[m
+[32m+[m[32m    try {[m
+[32m+[m[32m      const result = await model.generateContent(prompt);[m
+[32m+[m[32m      return result.response.text();[m
+[32m+[m[32m    } catch (err) {[m
+[32m+[m[32m      lastError = err;[m
+[32m+[m[32m      if (isQuotaError(err)) {[m
+[32m+[m[32m        quotaExceededUntil = Date.now() + QUOTA_COOLDOWN_MS;[m
+[32m+[m[32m        throw err; // Don't burn further attempts against an exhausted quota.[m
+[32m+[m[32m      }[m
+[32m+[m[32m      if (!isRetryableError(err) || attempt === maxAttempts - 1) {[m
+[32m+[m[32m        throw err;[m
+[32m+[m[32m      }[m
+[32m+[m[32m      // Exponential backoff with jitter: ~300ms, ~700ms.[m
+[32m+[m[32m      await sleep(300 * 2 ** attempt + Math.random() * 100);[m
+[32m+[m[32m    }[m
+[32m+[m[32m  }[m
+[32m+[m[32m  throw lastError;[m
+[32m+[m[32m}[m
+[32m+[m
+ function formatHistory(history: ChatTurn[]): string {[m
+   return history[m
+     .slice(-8)[m
+[36m@@ -69,6 +147,19 @@[m [mexport async function askMehrae(message: string, history: ChatTurn[]): Promise<A[m
+     };[m
+   }[m
+ [m
+[32m+[m[32m  // Circuit breaker: if we recently learned the Gemini quota is exhausted,[m
+[32m+[m[32m  // skip the doomed network round trip entirely and go straight to the[m
+[32m+[m[32m  // grounded catalogue fallback. This keeps the assistant fast and[m
+[32m+[m[32m  // available under load instead of every request queuing up on a 429.[m
+[32m+[m[32m  if (Date.now() < quotaExceededUntil) {[m
+[32m+[m[32m    return {[m
+[32m+[m[32m      message: QUOTA_FALLBACK_MESSAGE,[m
+[32m+[m[32m      recommendations: candidates[m
+[32m+[m[32m        .slice(0, 3)[m
+[32m+[m[32m        .map((product) => ({ product, reason: "A close match for your request." })),[m
+[32m+[m[32m    };[m
+[32m+[m[32m  }[m
+[32m+[m
+   const context = candidates.map(toAiContext);[m
+   const genAI = new GoogleGenerativeAI(apiKey);[m
+   const model = genAI.getGenerativeModel({[m
+[36m@@ -85,15 +176,14 @@[m [mexport async function askMehrae(message: string, history: ChatTurn[]): Promise<A[m
+ [m
+   let raw: string;[m
+   try {[m
+[31m-    const result = await model.generateContent([m
+[32m+[m[32m    raw = await generateWithRetry([m
+[32m+[m[32m      model,[m
+       buildUserTurn(JSON.stringify(context), message, formatHistory(history))[m
+     );[m
+[31m-    raw = result.response.text();[m
+   } catch (err) {[m
+     console.error("Gemini call failed", err);[m
+     return {[m
+[31m-      message:[m
+[31m-        "I'm having trouble reaching the styling assistant right now - here are a few pieces that might suit you.",[m
+[32m+[m[32m      message: isQuotaError(err) ? QUOTA_FALLBACK_MESSAGE : GENERIC_ERROR_FALLBACK_MESSAGE,[m
+       recommendations: candidates[m
+         .slice(0, 3)[m
+         .map((product) => ({ product, reason: "A close match for your request." })),[m
+[1mdiff --git a/lib/ai/retrieval.ts b/lib/ai/retrieval.ts[m
+[1mindex bd77ab6..dedaf49 100644[m
+[1m--- a/lib/ai/retrieval.ts[m
+[1m+++ b/lib/ai/retrieval.ts[m
+[36m@@ -40,6 +40,44 @@[m [mfunction extractColor(message: string): string | undefined {[m
+   return COLOR_WORDS.find((c) => lower.includes(c));[m
+ }[m
+ [m
+[32m+[m[32m// Garment-type synonyms mapped to the real category slugs seeded in the[m
+[32m+[m[32m// database (see supabase/seed.sql). This was previously missing entirely:[m
+[32m+[m[32m// a message like "show me a lehenga for a wedding" only matched on the[m
+[32m+[m[32m// occasion word ("wedding") and never narrowed by garment type, so shoppers[m
+[32m+[m[32m// asking specifically for sarees/lehengas/dresses/jewellery could still get[m
+[32m+[m[32m// a mixed, generic set of products back. Matching category first is a much[m
+[32m+[m[32m// stronger relevance signal than the raw keyword fallback further down.[m
+[32m+[m[32mconst CATEGORY_SYNONYMS: Record<string, string> = {[m
+[32m+[m[32m  saree: "sarees",[m
+[32m+[m[32m  sarees: "sarees",[m
+[32m+[m[32m  sari: "sarees",[m
+[32m+[m[32m  saris: "sarees",[m
+[32m+[m[32m  lehenga: "lehengas",[m
+[32m+[m[32m  lehengas: "lehengas",[m
+[32m+[m[32m  lehnga: "lehengas",[m
+[32m+[m[32m  lengha: "lehengas",[m
+[32m+[m[32m  dress: "dresses",[m
+[32m+[m[32m  dresses: "dresses",[m
+[32m+[m[32m  gown: "dresses",[m
+[32m+[m[32m  gowns: "dresses",[m
+[32m+[m[32m  jewellery: "jewellery",[m
+[32m+[m[32m  jewelry: "jewellery",[m
+[32m+[m[32m  necklace: "jewellery",[m
+[32m+[m[32m  necklaces: "jewellery",[m
+[32m+[m[32m  earrings: "jewellery",[m
+[32m+[m[32m  earring: "jewellery",[m
+[32m+[m[32m  bangles: "jewellery",[m
+[32m+[m[32m  bangle: "jewellery",[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mfunction extractCategorySlug(message: string): string | undefined {[m
+[32m+[m[32m  const words = message.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/);[m
+[32m+[m[32m  for (const word of words) {[m
+[32m+[m[32m    if (CATEGORY_SYNONYMS[word]) return CATEGORY_SYNONYMS[word];[m
+[32m+[m[32m  }[m
+[32m+[m[32m  return undefined;[m
+[32m+[m[32m}[m
+[32m+[m
+ /**[m
+  * Retrieves a bounded, relevant set of ACTIVE products for Gemini to reason[m
+  * over. This is the grounding step: Gemini will only ever be shown (and[m
+[36m@@ -54,6 +92,7 @@[m [mexport async function retrieveCandidateProducts([m
+   const occasion = extractOccasion(message);[m
+   const color = extractColor(message);[m
+   const maxPrice = extractMaxPrice(message);[m
+[32m+[m[32m  const categorySlug = extractCategorySlug(message);[m
+ [m
+   let query = supabase[m
+     .from("products")[m
+[36m@@ -63,6 +102,19 @@[m [mexport async function retrieveCandidateProducts([m
+   if (occasion) query = query.contains("occasion_tags", [occasion]);[m
+   if (color) query = query.ilike("color_family", `%${color}%`);[m
+   if (typeof maxPrice === "number") query = query.lte("base_price", maxPrice);[m
+[32m+[m[32m  if (categorySlug) {[m
+[32m+[m[32m    // category_id is nullable and the select above uses a left join[m
+[32m+[m[32m    // (categories(*), not categories!inner(*)) so existing uncategorised[m
+[32m+[m[32m    // products keep showing up for every other query - resolve the slug to[m
+[32m+[m[32m    // an id first rather than switching the join type, to avoid silently[m
+[32m+[m[32m    // dropping products from unrelated queries.[m
+[32m+[m[32m    const { data: category } = await supabase[m
+[32m+[m[32m      .from("categories")[m
+[32m+[m[32m      .select("id")[m
+[32m+[m[32m      .eq("slug", categorySlug)[m
+[32m+[m[32m      .maybeSingle();[m
+[32m+[m[32m    if (category) query = query.eq("category_id", category.id);[m
+[32m+[m[32m  }[m
+ [m
+   const { data } = await query.limit(limit);[m
+   let products = (data ?? []) as unknown as ProductWithRelations[];[m
+[1mdiff --git a/proxy.ts b/proxy.ts[m
+[1mindex f3a5d33..b7177ab 100644[m
+[1m--- a/proxy.ts[m
+[1m+++ b/proxy.ts[m
+[36m@@ -1,11 +1,33 @@[m
+ import { NextResponse, type NextRequest } from "next/server";[m
+ import { createServerClient } from "@supabase/ssr";[m
+[32m+[m[32mimport { rateLimit, getClientIp } from "@/lib/rate-limit";[m
+ [m
+ const PROTECTED_PREFIXES = ["/account", "/orders", "/checkout", "/admin"];[m
+ [m
+[32m+[m[32m// General ceiling for all API routes, applied here so every route handler[m
+[32m+[m[32m// gets baseline abuse/DoS protection without each one wiring it up[m
+[32m+[m[32m// individually. /api/ai has its own additional, tighter limit (see[m
+[32m+[m[32m// app/api/ai/route.ts) since it's the one backed by a metered third-party[m
+[32m+[m[32m// API - this general limit exists for the rest (cart, checkout, search,[m
+[32m+[m[32m// admin writes, etc.) so a single client can't hammer the database at the[m
+[32m+[m[32m// expense of the ~10k other concurrent shoppers.[m
+[32m+[m[32mconst API_LIMIT = 60;[m
+[32m+[m[32mconst API_WINDOW_SECONDS = 60;[m
+[32m+[m
+ export async function proxy(request: NextRequest) {[m
+   let response = NextResponse.next({ request });[m
+ [m
+[32m+[m[32m  if (request.nextUrl.pathname.startsWith("/api/")) {[m
+[32m+[m[32m    const ip = getClientIp(request);[m
+[32m+[m[32m    const { success, retryAfter } = await rateLimit(`api:${ip}`, API_LIMIT, API_WINDOW_SECONDS);[m
+[32m+[m[32m    if (!success) {[m
+[32m+[m[32m      return NextResponse.json([m
+[32m+[m[32m        { error: "Too many requests. Please slow down and try again shortly." },[m
+[32m+[m[32m        { status: 429, headers: { "Retry-After": String(retryAfter) } }[m
+[32m+[m[32m      );[m
+[32m+[m[32m    }[m
+[32m+[m[32m  }[m
+[32m+[m
+   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;[m
+   const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;[m
+ [m

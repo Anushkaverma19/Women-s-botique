@@ -15,9 +15,87 @@ export interface AskMehraeResult {
 const FALLBACK_MESSAGE =
   "I couldn't find a piece matching that request in the current collection.";
 
+const QUOTA_FALLBACK_MESSAGE =
+  "Our styling assistant is in high demand right now, so I can't add personal notes just yet - but here are real pieces from the collection that match what you asked for.";
+
+const GENERIC_ERROR_FALLBACK_MESSAGE =
+  "I'm having trouble reaching the styling assistant right now - here are a few pieces that might suit you.";
+
 interface ChatTurn {
   role: "user" | "assistant";
   content: string;
+}
+
+/**
+ * Process-local circuit breaker for Gemini quota exhaustion.
+ *
+ * When Gemini returns a 429/RESOURCE_EXHAUSTED, we already know every other
+ * concurrent request in this process is about to hit the same wall - so
+ * instead of making each of them pay the latency of a doomed API call (and
+ * counting further against the quota once it partially recovers), we short
+ * -circuit straight to the catalogue-only fallback for a cooldown window.
+ *
+ * This is per-instance state, same caveat as the in-memory rate limiter in
+ * lib/rate-limit.ts: on a single server it's exactly right, on many
+ * serverless instances each instance discovers the outage independently
+ * (slightly less efficient, but never incorrect - worst case is a few
+ * redundant calls across instances, not a crash).
+ */
+const QUOTA_COOLDOWN_MS = 30_000;
+let quotaExceededUntil = 0;
+
+function isQuotaError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("429") ||
+    message.includes("RESOURCE_EXHAUSTED") ||
+    message.toLowerCase().includes("quota")
+  );
+}
+
+function isRetryableError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  // Transient server-side / network issues are worth a quick retry.
+  // Quota errors and 4xx client errors (bad request, invalid key, etc.)
+  // are not - retrying them immediately just wastes time and quota.
+  return (
+    message.includes("500") ||
+    message.includes("503") ||
+    message.includes("fetch failed") ||
+    message.toLowerCase().includes("timeout") ||
+    message.toLowerCase().includes("network")
+  );
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Calls Gemini with a couple of short, backed-off retries for transient errors only. */
+async function generateWithRetry(
+  model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
+  prompt: string,
+  maxAttempts = 3
+): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      return result.response.text();
+    } catch (err) {
+      lastError = err;
+      if (isQuotaError(err)) {
+        quotaExceededUntil = Date.now() + QUOTA_COOLDOWN_MS;
+        throw err; // Don't burn further attempts against an exhausted quota.
+      }
+      if (!isRetryableError(err) || attempt === maxAttempts - 1) {
+        throw err;
+      }
+      // Exponential backoff with jitter: ~300ms, ~700ms.
+      await sleep(300 * 2 ** attempt + Math.random() * 100);
+    }
+  }
+  throw lastError;
 }
 
 function formatHistory(history: ChatTurn[]): string {
@@ -69,6 +147,19 @@ export async function askMehrae(message: string, history: ChatTurn[]): Promise<A
     };
   }
 
+  // Circuit breaker: if we recently learned the Gemini quota is exhausted,
+  // skip the doomed network round trip entirely and go straight to the
+  // grounded catalogue fallback. This keeps the assistant fast and
+  // available under load instead of every request queuing up on a 429.
+  if (Date.now() < quotaExceededUntil) {
+    return {
+      message: QUOTA_FALLBACK_MESSAGE,
+      recommendations: candidates
+        .slice(0, 3)
+        .map((product) => ({ product, reason: "A close match for your request." })),
+    };
+  }
+
   const context = candidates.map(toAiContext);
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
@@ -85,15 +176,14 @@ export async function askMehrae(message: string, history: ChatTurn[]): Promise<A
 
   let raw: string;
   try {
-    const result = await model.generateContent(
+    raw = await generateWithRetry(
+      model,
       buildUserTurn(JSON.stringify(context), message, formatHistory(history))
     );
-    raw = result.response.text();
   } catch (err) {
     console.error("Gemini call failed", err);
     return {
-      message:
-        "I'm having trouble reaching the styling assistant right now - here are a few pieces that might suit you.",
+      message: isQuotaError(err) ? QUOTA_FALLBACK_MESSAGE : GENERIC_ERROR_FALLBACK_MESSAGE,
       recommendations: candidates
         .slice(0, 3)
         .map((product) => ({ product, reason: "A close match for your request." })),

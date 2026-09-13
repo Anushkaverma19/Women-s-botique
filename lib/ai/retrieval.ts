@@ -40,6 +40,44 @@ function extractColor(message: string): string | undefined {
   return COLOR_WORDS.find((c) => lower.includes(c));
 }
 
+// Garment-type synonyms mapped to the real category slugs seeded in the
+// database (see supabase/seed.sql). This was previously missing entirely:
+// a message like "show me a lehenga for a wedding" only matched on the
+// occasion word ("wedding") and never narrowed by garment type, so shoppers
+// asking specifically for sarees/lehengas/dresses/jewellery could still get
+// a mixed, generic set of products back. Matching category first is a much
+// stronger relevance signal than the raw keyword fallback further down.
+const CATEGORY_SYNONYMS: Record<string, string> = {
+  saree: "sarees",
+  sarees: "sarees",
+  sari: "sarees",
+  saris: "sarees",
+  lehenga: "lehengas",
+  lehengas: "lehengas",
+  lehnga: "lehengas",
+  lengha: "lehengas",
+  dress: "dresses",
+  dresses: "dresses",
+  gown: "dresses",
+  gowns: "dresses",
+  jewellery: "jewellery",
+  jewelry: "jewellery",
+  necklace: "jewellery",
+  necklaces: "jewellery",
+  earrings: "jewellery",
+  earring: "jewellery",
+  bangles: "jewellery",
+  bangle: "jewellery",
+};
+
+function extractCategorySlug(message: string): string | undefined {
+  const words = message.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/);
+  for (const word of words) {
+    if (CATEGORY_SYNONYMS[word]) return CATEGORY_SYNONYMS[word];
+  }
+  return undefined;
+}
+
 /**
  * Retrieves a bounded, relevant set of ACTIVE products for Gemini to reason
  * over. This is the grounding step: Gemini will only ever be shown (and
@@ -54,6 +92,7 @@ export async function retrieveCandidateProducts(
   const occasion = extractOccasion(message);
   const color = extractColor(message);
   const maxPrice = extractMaxPrice(message);
+  const categorySlug = extractCategorySlug(message);
 
   let query = supabase
     .from("products")
@@ -63,6 +102,19 @@ export async function retrieveCandidateProducts(
   if (occasion) query = query.contains("occasion_tags", [occasion]);
   if (color) query = query.ilike("color_family", `%${color}%`);
   if (typeof maxPrice === "number") query = query.lte("base_price", maxPrice);
+  if (categorySlug) {
+    // category_id is nullable and the select above uses a left join
+    // (categories(*), not categories!inner(*)) so existing uncategorised
+    // products keep showing up for every other query - resolve the slug to
+    // an id first rather than switching the join type, to avoid silently
+    // dropping products from unrelated queries.
+    const { data: category } = await supabase
+      .from("categories")
+      .select("id")
+      .eq("slug", categorySlug)
+      .maybeSingle();
+    if (category) query = query.eq("category_id", category.id);
+  }
 
   const { data } = await query.limit(limit);
   let products = (data ?? []) as unknown as ProductWithRelations[];
