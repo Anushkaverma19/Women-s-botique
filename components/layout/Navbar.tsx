@@ -20,21 +20,33 @@ export async function Navbar() {
   const isAdmin = profile?.role === "admin";
 
   return (
-    <header className="sticky top-0 z-30 bg-ivory/95 backdrop-blur border-b border-charcoal/10">
+    <header className="sticky top-0 z-30 bg-ivory border-b border-charcoal/10">
       <a href="#main-content" className="skip-link">
         Skip to content
       </a>
+
       <div className="mx-auto max-w-[1400px] px-4 sm:px-8 lg:px-12 h-20 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 sm:gap-6 lg:gap-10 min-w-0">
           <MobileMenu isLoggedIn={isLoggedIn} isAdmin={isAdmin} />
-          <Link href="/" className="font-display text-xl sm:text-2xl lg:text-3xl tracking-wide truncate">
+
+          <Link
+            href="/"
+            className="font-display text-xl sm:text-2xl lg:text-3xl tracking-wide truncate"
+          >
             MEHRAÉ
           </Link>
         </div>
 
-        <nav className="hidden md:flex items-center gap-8 eyebrow text-charcoal/80" aria-label="Primary">
+        <nav
+          className="hidden md:flex items-center gap-8 eyebrow text-charcoal/80"
+          aria-label="Primary"
+        >
           {LINKS.map((link) => (
-            <Link key={link.href} href={link.href} className="hover:text-burgundy">
+            <Link
+              key={link.href}
+              href={link.href}
+              className="hover:text-burgundy"
+            >
               {link.label}
             </Link>
           ))}
@@ -42,6 +54,7 @@ export async function Navbar() {
 
         <div className="flex items-center gap-2 sm:gap-4 shrink-0">
           <SearchOverlay />
+
           <Link
             href={isLoggedIn ? "/account" : "/login"}
             aria-label={isLoggedIn ? "My account" : "Login"}
@@ -49,11 +62,16 @@ export async function Navbar() {
           >
             <User size={19} />
           </Link>
+
           {isAdmin ? (
-            <Link href="/admin" className="hidden lg:inline eyebrow hover:text-burgundy">
+            <Link
+              href="/admin"
+              className="hidden lg:inline eyebrow hover:text-burgundy"
+            >
               Admin
             </Link>
           ) : null}
+
           <BagButton />
         </div>
       </div>
