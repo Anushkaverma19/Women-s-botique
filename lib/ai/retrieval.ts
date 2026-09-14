@@ -215,19 +215,34 @@ export async function retrieveCandidateProducts(
   }));
 }
 
-export function toAiContext(product: ProductWithRelations): string {
-  const category =
-    product.category && "name" in product.category
-      ? product.category.name
-      : "";
-
-  return [
-    `Product: ${product.name}`,
-    `ID: ${product.id}`,
-    `Category: ${category}`,
-    `Price: ₹${product.base_price}`,
-    `Color: ${product.color_family ?? ""}`,
-    `Material: ${product.material ?? ""}`,
-    `Description: ${product.description ?? ""}`,
-  ].join("\n");
+/**
+ * Strips a product down to only what Gemini needs to reason and never leaks
+ * internal fields.
+ *
+ * MUST stay a structured object with a literal `productId` field: the
+ * system prompt (lib/ai/systemPrompt.ts) explicitly tells Gemini "PRODUCT
+ * CONTEXT ... as JSON" and instructs it to copy "productId" exactly from
+ * this context. A prior revision of this function returned a formatted
+ * multi-line string per product (with the id on an "ID:" line instead of a
+ * `productId` field), which silently broke that contract - Gemini had to
+ * infer the field name and hand-transcribe a UUID out of prose instead of
+ * copying a clean field, which is why recommendations were only right
+ * *some* of the time. Keep this as a plain object.
+ */
+export function toAiContext(product: ProductWithRelations) {
+  const inStock = product.variants.some((v) => v.active && v.stock_quantity > 0);
+  return {
+    productId: product.id,
+    name: product.name,
+    category: product.category?.name ?? "",
+    description: product.description,
+    price: product.base_price,
+    colorFamily: product.color_family,
+    material: product.material,
+    occasionTags: product.occasion_tags,
+    inStock,
+    sizesAvailable: Array.from(
+      new Set(product.variants.filter((v) => v.active && v.stock_quantity > 0).map((v) => v.size))
+    ),
+  };
 }
