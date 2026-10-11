@@ -49,7 +49,7 @@ export default function LoginPage() {
 
     setLoading(false);
 
-    const redirectTo = searchParams.get("redirectTo") || "/";
+    const redirectTo = searchParams.get("redirectTo") || "/account";
     window.location.href = redirectTo;
   }
 
