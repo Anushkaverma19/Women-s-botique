@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { CartItemWithDetails } from "@/types/database";
+import { createClient } from "@/lib/supabase/client";
 
 interface CartContextValue {
   items: CartItemWithDetails[];
@@ -28,6 +29,18 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
+      const supabase = createClient();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      // If user is not logged in, skip fetching cart to prevent 401 errors
+      if (!session) {
+        setItems([]);
+        setSubtotal(0);
+        return;
+      }
+
       const res = await fetch("/api/cart");
       if (!res.ok) {
         setItems([]);
@@ -43,9 +56,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    // Intentional fetch-on-mount to hydrate the cart from the server -
-    // the documented exception to "avoid effects", not a synchronization
-    // bug (see https://react.dev/learn/you-might-not-need-an-effect).
+    // Intentional fetch-on-mount to hydrate the cart from the server if authenticated
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
   }, [refresh]);
