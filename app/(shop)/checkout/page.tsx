@@ -8,9 +8,39 @@ import { Button, LinkButton } from "@/components/ui/button";
 import { Input, Label, FieldError } from "@/components/ui/field";
 import { formatINR } from "@/lib/utils";
 import { checkoutSchema } from "@/lib/validations/schemas";
+import { createRazorpayOrder, verifyRazorpayPayment } from "@/app/actions/razorpay";
 
 const FREE_SHIPPING_THRESHOLD = 5000;
 const FLAT_SHIPPING = 149;
+
+declare global {
+  interface Window {
+    Razorpay?: new (options: Record<string, unknown>) => { open: () => void };
+  }
+}
+
+const RAZORPAY_CHECKOUT_SRC = "https://checkout.razorpay.com/v1/checkout.js";
+
+/** Loads Razorpay's Checkout script once and reuses it on later opens. */
+function loadRazorpayScript(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (window.Razorpay) {
+      resolve(true);
+      return;
+    }
+    const existing = document.querySelector(`script[src="${RAZORPAY_CHECKOUT_SRC}"]`);
+    if (existing) {
+      existing.addEventListener("load", () => resolve(true));
+      existing.addEventListener("error", () => resolve(false));
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = RAZORPAY_CHECKOUT_SRC;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
 
 type FormState = {
   customerName: string;
@@ -43,7 +73,6 @@ export default function CheckoutPage() {
   const [couponApplied, setCouponApplied] = useState<{ code: string; discountAmount: number } | null>(null);
   const [couponError, setCouponError] = useState<string | null>(null);
   const [couponLoading, setCouponLoading] = useState(false);
-  const [payment, setPayment] = useState<"success" | "fail">("success");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -82,10 +111,13 @@ export default function CheckoutPage() {
     setSubmitError(null);
     setErrors({});
 
+    // checkoutSchema still requires paymentOutcome (the demo field); reuse
+    // it for shape/field validation only, with a fixed placeholder value -
+    // Razorpay doesn't take a client-declared outcome at all.
     const parsed = checkoutSchema.safeParse({
       ...form,
       couponCode: couponApplied?.code ?? "",
-      paymentOutcome: payment,
+      paymentOutcome: "success",
     });
 
     if (!parsed.success) {
@@ -100,21 +132,97 @@ export default function CheckoutPage() {
 
     setSubmitting(true);
     try {
-      const res = await fetch("/api/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed.data),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        if (data.code === "PAYMENT_FAILED") {
-          router.push("/checkout/failed");
-          return;
-        }
-        setSubmitError(data.error ?? "We couldn't place this order. Please try again.");
+      const orderInput = {
+        customerName: parsed.data.customerName,
+        customerEmail: parsed.data.customerEmail,
+        customerPhone: parsed.data.customerPhone,
+        shippingAddress: parsed.data.shippingAddress,
+        shippingCity: parsed.data.shippingCity,
+        shippingState: parsed.data.shippingState,
+        shippingPostalCode: parsed.data.shippingPostalCode,
+        shippingCountry: parsed.data.shippingCountry,
+        couponCode: parsed.data.couponCode,
+      };
+      const result = await createRazorpayOrder(orderInput);
+
+      if (!result.ok || !result.razorpayOrderId || !result.keyId) {
+        setSubmitError(result.error ?? "We couldn't start the payment. Please try again.");
         return;
       }
-      router.push(`/checkout/success?order=${data.order.id}`);
+
+      const scriptLoaded = await loadRazorpayScript();
+      if (!scriptLoaded || !window.Razorpay) {
+        setSubmitError("We couldn't load the payment gateway. Check your connection and try again.");
+        return;
+      }
+
+      const razorpay = new window.Razorpay({
+        key: result.keyId,
+        amount: result.amount,
+        currency: result.currency,
+        order_id: result.razorpayOrderId,
+        name: "MEHRAÉ",
+        description: "Order payment",
+        // Cardless-first: UPI and NetBanking are surfaced ahead of other
+        // methods rather than removed outright (Razorpay account-level
+        // settings control which methods are enabled at all).
+        config: {
+          display: {
+            blocks: {
+              upi: { name: "Pay by UPI", instruments: [{ method: "upi" }] },
+              netbanking: { name: "NetBanking", instruments: [{ method: "netbanking" }] },
+            },
+            sequence: ["block.upi", "block.netbanking"],
+            preferences: { show_default_blocks: true },
+          },
+        },
+        prefill: {
+          name: form.customerName,
+          email: form.customerEmail,
+          contact: form.customerPhone,
+        },
+        handler: async (response: {
+          razorpay_order_id: string;
+          razorpay_payment_id: string;
+          razorpay_signature: string;
+        }) => {
+          setSubmitting(true);
+          try {
+            const verifyResult = await verifyRazorpayPayment({
+              razorpayOrderId: response.razorpay_order_id,
+              razorpayPaymentId: response.razorpay_payment_id,
+              razorpaySignature: response.razorpay_signature,
+            });
+            if (verifyResult.ok && verifyResult.orderId) {
+              router.push(`/checkout/success?order=${verifyResult.orderId}`);
+            } else {
+              // The payment may still be genuine even if this fast-path
+              // check couldn't confirm it here (e.g. a dropped connection
+              // right after paying) - the webhook is the durable backstop
+              // that finalizes the order independently of this callback.
+              router.push("/checkout/success?pending=1");
+            }
+          } finally {
+            setSubmitting(false);
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            // User closed the Razorpay modal without paying. The order
+            // stays 'pending' with stock reserved; the webhook will mark it
+            // failed if Razorpay reports payment.failed, and
+            // release_stale_razorpay_orders (scheduled separately) cleans
+            // up reservations that are abandoned entirely.
+            setSubmitting(false);
+            setSubmitError("Payment was not completed. You can try again.");
+          },
+        },
+      });
+
+      razorpay.open();
+    } catch (err) {
+      console.error("Checkout failed:", err);
+      setSubmitError("Something went wrong. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -191,18 +299,8 @@ export default function CheckoutPage() {
           <section>
             <h2 className="eyebrow text-charcoal/60 mb-4">Payment</h2>
             <p className="text-xs text-charcoal/50 mb-4">
-              Payment is simulated for this project - no real payment gateway is used.
+              Pay securely via UPI or NetBanking. You&apos;ll be redirected to Razorpay to complete payment - card details are never entered or stored on MEHRAÉ.
             </p>
-            <div className="space-y-3">
-              <label className="flex items-center gap-3 border border-charcoal/20 px-4 py-3 cursor-pointer">
-                <input type="radio" name="payment" checked={payment === "success"} onChange={() => setPayment("success")} />
-                Simulate Successful Payment
-              </label>
-              <label className="flex items-center gap-3 border border-charcoal/20 px-4 py-3 cursor-pointer">
-                <input type="radio" name="payment" checked={payment === "fail"} onChange={() => setPayment("fail")} />
-                Simulate Failed Payment
-              </label>
-            </div>
           </section>
         </div>
 
@@ -268,7 +366,7 @@ export default function CheckoutPage() {
           ) : null}
 
           <Button type="submit" disabled={submitting} className="w-full mt-6">
-            {submitting ? "Placing Order..." : "Place Order"}
+            {submitting ? "Processing..." : "Pay Now"}
           </Button>
         </div>
       </form>

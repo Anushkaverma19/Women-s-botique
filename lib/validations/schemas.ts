@@ -41,6 +41,17 @@ export const checkoutSchema = z.object({
   paymentOutcome: z.enum(["success", "fail"]),
 });
 
+// Same shipping/customer fields as checkoutSchema, minus paymentOutcome:
+// Razorpay orders don't know the payment outcome at creation time (that's
+// the whole point of an async gateway - see supabase/migrations/0007_razorpay.sql).
+export const razorpayOrderSchema = checkoutSchema.omit({ paymentOutcome: true });
+
+export const razorpayVerifySchema = z.object({
+  razorpayOrderId: z.string().trim().min(1),
+  razorpayPaymentId: z.string().trim().min(1),
+  razorpaySignature: z.string().trim().min(1),
+});
+
 export const cartItemSchema = z.object({
   variantId: z.string().uuid("Invalid variant."),
   quantity: z.number().int().min(1).max(10, "Maximum 10 per item."),

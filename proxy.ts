@@ -11,13 +11,20 @@ const PROTECTED_PREFIXES = ["/account", "/orders", "/checkout", "/admin"];
 // API - this general limit exists for the rest (cart, checkout, search,
 // admin writes, etc.) so a single client can't hammer the database at the
 // expense of the ~10k other concurrent shoppers.
+//
+// /api/webhooks/* is deliberately excluded below: that traffic comes from
+// a payment provider's own servers (a small, shared set of IPs), not
+// individual shoppers, and rate-limiting it by IP could silently drop a
+// legitimate payment confirmation under real order volume. Trust for
+// webhooks comes from signature verification in the route itself, not
+// from this limiter - see app/api/webhooks/razorpay/route.ts.
 const API_LIMIT = 60;
 const API_WINDOW_SECONDS = 60;
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
 
-  if (request.nextUrl.pathname.startsWith("/api/")) {
+  if (request.nextUrl.pathname.startsWith("/api/") && !request.nextUrl.pathname.startsWith("/api/webhooks/")) {
     const ip = getClientIp(request);
     const { success, retryAfter } = await rateLimit(`api:${ip}`, API_LIMIT, API_WINDOW_SECONDS);
     if (!success) {

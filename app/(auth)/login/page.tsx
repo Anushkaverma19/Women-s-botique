@@ -36,22 +36,19 @@ export default function LoginPage() {
     setLoading(true);
     const supabase = createClient();
     const { error } = await supabase.auth.signInWithPassword(parsed.data);
-    setLoading(false);
 
     if (error) {
+      setLoading(false);
       setFormError("Incorrect email or password.");
       return;
     }
 
-    // A hard navigation (not router.push + router.refresh) is used
-    // deliberately here: Navbar and /account are Server Components that
-    // read the session from cookies on the server. router.push/refresh can
-    // race with the Supabase browser client finishing its cookie write, or
-    // serve an already-cached client-router payload for the destination
-    // route (e.g. if it was prefetched while logged out) - both of which
-    // showed up as "stuck on the login page" / a stale logged-out navbar,
-    // especially on mobile browsers. A full navigation always re-requests
-    // the page from the server with the fresh session cookie attached.
+    // Give Supabase browser client a short time to persist auth cookies
+    // to prevent race conditions with Next.js Server Components.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    setLoading(false);
+
     const redirectTo = searchParams.get("redirectTo") || "/account";
     window.location.href = redirectTo;
   }
