@@ -45,11 +45,11 @@ export default function LoginPage() {
 
     // Give Supabase browser client a short time to persist auth cookies
     // to prevent race conditions with Next.js Server Components.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
     setLoading(false);
 
-    const redirectTo = searchParams.get("redirectTo") || "/account";
+    const redirectTo = searchParams.get("redirectTo") || "/";
     window.location.href = redirectTo;
   }
 
