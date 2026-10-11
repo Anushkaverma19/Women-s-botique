@@ -30,12 +30,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     try {
       const supabase = createClient();
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      const { data: { user } } = await supabase.auth.getUser();
 
-      // If user is not logged in, skip fetching cart to prevent 401 errors
-      if (!session) {
+      // Agar user logged in nahi hai, toh API hit hi mat karo (401 error aayegi hi nahi!)
+      if (!user) {
         setItems([]);
         setSubtotal(0);
         return;
@@ -56,8 +54,6 @@ export function CartProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    // Intentional fetch-on-mount to hydrate the cart from the server if authenticated
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
   }, [refresh]);
 
