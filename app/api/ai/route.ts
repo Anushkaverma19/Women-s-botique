@@ -10,7 +10,7 @@ import type { ProductWithRelations } from "@/types/database";
 // relying only on the general middleware limit: 12 messages/minute per
 // client is generous for a real conversation but blocks scripted abuse
 // that would otherwise burn through the shared Gemini quota for everyone.
-const AI_LIMIT = 12;
+const AI_LIMIT = 4;
 const AI_WINDOW_SECONDS = 60;
 
 function toClientProduct(product: ProductWithRelations) {

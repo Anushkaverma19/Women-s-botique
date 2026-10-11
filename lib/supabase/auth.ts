@@ -10,9 +10,10 @@ import type { Profile } from "@/types/database";
  */
 export async function getSessionUser() {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { data: { user }, error } = await supabase.auth.getUser();
+  
+  console.log("SERVER USER:", user, "ERROR:", error); // <-- Yahan add karna hai
+  
   return user;
 }
 
