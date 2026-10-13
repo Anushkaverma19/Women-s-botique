@@ -4,25 +4,16 @@ import { rateLimit, getClientIp } from "@/lib/rate-limit";
 
 const PROTECTED_PREFIXES = ["/account", "/orders", "/checkout", "/admin"];
 
-// General ceiling for all API routes, applied here so every route handler
-// gets baseline abuse/DoS protection without each one wiring it up
-// individually. /api/ai has its own additional, tighter limit (see
-// app/api/ai/route.ts) since it's the one backed by a metered third-party
-// API - this general limit exists for the rest (cart, checkout, search,
-// admin writes, etc.) so a single client can't hammer the database at the
-// expense of the ~10k other concurrent shoppers.
-//
-// /api/webhooks/* is deliberately excluded below: that traffic comes from
-// a payment provider's own servers (a small, shared set of IPs), not
-// individual shoppers, and rate-limiting it by IP could silently drop a
-// legitimate payment confirmation under real order volume. Trust for
-// webhooks comes from signature verification in the route itself, not
-// from this limiter - see app/api/webhooks/razorpay/route.ts.
 const API_LIMIT = 60;
 const API_WINDOW_SECONDS = 60;
 
-export async function proxy(request: NextRequest) {
-  let response = NextResponse.next({ request });
+// ⚠️ Next.js middleware function ka naam MUST be 'middleware'
+export async function middleware(request: NextRequest) {
+  let response = NextResponse.next({
+    request: {
+      headers: request.headers,
+    },
+  });
 
   if (request.nextUrl.pathname.startsWith("/api/") && !request.nextUrl.pathname.startsWith("/api/webhooks/")) {
     const ip = getClientIp(request);
@@ -40,8 +31,6 @@ export async function proxy(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
-  // If Supabase isn't configured yet, don't hard-crash every request -
-  // let pages render and surface a clear configuration error themselves.
   if (!url || !key) {
     return response;
   }
@@ -53,7 +42,9 @@ export async function proxy(request: NextRequest) {
       },
       setAll(cookiesToSet) {
         cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
-        response = NextResponse.next({ request });
+        response = NextResponse.next({
+          request,
+        });
         cookiesToSet.forEach(({ name, value, options }) =>
           response.cookies.set(name, value, options)
         );
@@ -61,6 +52,7 @@ export async function proxy(request: NextRequest) {
     },
   });
 
+  // ⚠️ CRITICAL: supabase.auth.getUser() se session sync aur cookie refresh hota hai
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -74,8 +66,6 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   }
 
-  // Admin section: confirm the actual role, server-side, via the profiles
-  // table - a valid session alone is not enough to enter /admin.
   if (path.startsWith("/admin") && user) {
     const { data: profile } = await supabase
       .from("profiles")
