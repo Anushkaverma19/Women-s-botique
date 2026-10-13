@@ -7,8 +7,7 @@ const PROTECTED_PREFIXES = ["/account", "/orders", "/checkout", "/admin"];
 const API_LIMIT = 60;
 const API_WINDOW_SECONDS = 60;
 
-// ⚠️ Next.js middleware function ka naam MUST be 'middleware'
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let response = NextResponse.next({
     request: {
       headers: request.headers,
@@ -52,7 +51,6 @@ export async function middleware(request: NextRequest) {
     },
   });
 
-  // ⚠️ CRITICAL: supabase.auth.getUser() se session sync aur cookie refresh hota hai
   const {
     data: { user },
   } = await supabase.auth.getUser();
