@@ -132,7 +132,7 @@ begin
 
     select * into v_product from public.products where id = v_variant.product_id;
 
-    update public.product_variants
+    update public.product_variantsx`
       set stock_quantity = stock_quantity - (v_item ->> 'quantity')::int
       where id = v_variant.id;
 
