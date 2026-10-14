@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "provision:demo-admin": "node --env-file=.env.local --experimental-strip-types scripts/provision-demo-admin.ts"
+    "provision:demo-admin": "node --env-file=.env.local --experimental-strip-types scripts/provision-demo-admin.ts",
+    "ml:train": "python train_model.py",
+    "ml:serve": "python scripts/predict_intent.py --serve --port 5005"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

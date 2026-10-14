@@ -48,3 +48,7 @@ next-env.d.ts
 # misc
 *.tsbuildinfo
 .vercel
+
+# datasets
+flipkart_fashion_products_dataset.json
+output.xlsx

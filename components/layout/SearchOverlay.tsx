@@ -15,6 +15,7 @@ interface QuickResult {
   basePrice: number;
   image: string | null;
   inStock: boolean;
+  reason?: string;
 }
 
 export function SearchOverlay() {
@@ -104,6 +105,11 @@ export function SearchOverlay() {
                         <p className="text-xs text-charcoal/50">
                           {formatINR(product.basePrice)} {!product.inStock ? "· Out of stock" : ""}
                         </p>
+                        {product.reason ? (
+                          <p className="text-[11px] text-terracotta tracking-wide uppercase mt-0.5">
+                            ✦ {product.reason}
+                          </p>
+                        ) : null}
                       </div>
                     </Link>
                   </li>

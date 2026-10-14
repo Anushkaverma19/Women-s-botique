@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * Lightweight rate limiting for Route Handlers / middleware.
  *

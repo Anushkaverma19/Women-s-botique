@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { listProducts } from "@/lib/products/queries";
+import { predictSearchIntent } from "@/lib/recommendations/intent-bridge";
 import { handleApiError } from "@/lib/api-response";
 
 export async function GET(request: Request) {
@@ -17,15 +18,43 @@ export async function GET(request: Request) {
       basePrice: p.base_price,
       image: p.images[0]?.image_url ?? null,
       inStock: p.variants.some((v) => v.active && v.stock_quantity > 0),
+      reason: undefined as string | undefined,
     }));
+
+    // If direct keyword search produced fewer than 3 results, enrich with ML intent predictions
+    if (trimmed.length < 3) {
+      try {
+        const intent = await predictSearchIntent(q);
+        const { products: intentProducts } = await listProducts({
+          category: intent.matched_category,
+          page: 1,
+          sort: "featured",
+        });
+
+        const seenIds = new Set(trimmed.map((p) => p.id));
+        for (const p of intentProducts) {
+          if (!seenIds.has(p.id)) {
+            trimmed.push({
+              id: p.id,
+              slug: p.slug,
+              name: p.name,
+              basePrice: p.base_price,
+              image: p.images[0]?.image_url ?? null,
+              inStock: p.variants.some((v) => v.active && v.stock_quantity > 0),
+              reason: `Recommended for ${intent.predicted_sub_category} intent`,
+            });
+            seenIds.add(p.id);
+          }
+          if (trimmed.length >= 6) break;
+        }
+      } catch (e) {
+        console.warn("Intent search enrichment skipped:", e);
+      }
+    }
+
     return NextResponse.json(
       { products: trimmed },
       {
-        // Public, non-personalised catalogue data: safe to cache briefly at
-        // the CDN edge. stale-while-revalidate means most repeat searches
-        // (very common with a live-typing search box) are served instantly
-        // from cache instead of hitting Supabase on every keystroke, which
-        // matters a lot at ~10k concurrent users.
         headers: { "Cache-Control": "public, s-maxage=30, stale-while-revalidate=120" },
       }
     );

@@ -61,7 +61,9 @@ export async function proxy(request: NextRequest) {
   if (isProtected && !user) {
     const redirectUrl = new URL("/login", request.url);
     redirectUrl.searchParams.set("redirectTo", path);
-    return NextResponse.redirect(redirectUrl);
+    const redirectRes = NextResponse.redirect(redirectUrl);
+    response.cookies.getAll().forEach((c) => redirectRes.cookies.set(c.name, c.value, c));
+    return redirectRes;
   }
 
   if (path.startsWith("/admin") && user) {
@@ -72,7 +74,9 @@ export async function proxy(request: NextRequest) {
       .single();
 
     if (!profile || profile.role !== "admin") {
-      return NextResponse.redirect(new URL("/", request.url));
+      const homeRedirect = NextResponse.redirect(new URL("/", request.url));
+      response.cookies.getAll().forEach((c) => homeRedirect.cookies.set(c.name, c.value, c));
+      return homeRedirect;
     }
   }
 
