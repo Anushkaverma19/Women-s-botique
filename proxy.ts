@@ -9,9 +9,7 @@ const API_WINDOW_SECONDS = 60;
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({
-    request: {
-      headers: request.headers,
-    },
+    request,
   });
 
   if (request.nextUrl.pathname.startsWith("/api/") && !request.nextUrl.pathname.startsWith("/api/webhooks/")) {
@@ -59,10 +57,11 @@ export async function proxy(request: NextRequest) {
   const isProtected = PROTECTED_PREFIXES.some((p) => path.startsWith(p));
 
   if (isProtected && !user) {
-    const redirectUrl = new URL("/login", request.url);
+    const redirectUrl = request.nextUrl.clone();
+    redirectUrl.pathname = "/login";
     redirectUrl.searchParams.set("redirectTo", path);
     const redirectRes = NextResponse.redirect(redirectUrl);
-    response.cookies.getAll().forEach((c) => redirectRes.cookies.set(c.name, c.value, c));
+    response.cookies.getAll().forEach((c) => redirectRes.cookies.set(c.name, c.value));
     return redirectRes;
   }
 
@@ -74,8 +73,11 @@ export async function proxy(request: NextRequest) {
       .single();
 
     if (!profile || profile.role !== "admin") {
-      const homeRedirect = NextResponse.redirect(new URL("/", request.url));
-      response.cookies.getAll().forEach((c) => homeRedirect.cookies.set(c.name, c.value, c));
+      const homeRedirectUrl = request.nextUrl.clone();
+      homeRedirectUrl.pathname = "/";
+      homeRedirectUrl.search = "";
+      const homeRedirect = NextResponse.redirect(homeRedirectUrl);
+      response.cookies.getAll().forEach((c) => homeRedirect.cookies.set(c.name, c.value));
       return homeRedirect;
     }
   }

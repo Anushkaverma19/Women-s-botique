@@ -27,15 +27,39 @@ export async function getCurrentProfile(): Promise<Profile | null> {
   const user = await getSessionUser();
   if (!user) return null;
 
-  const admin = createAdminClient();
-  const { data, error } = await admin
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single();
+  // 1. Try privileged admin client (bypasses RLS)
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from("profiles")
+      .select("*")
+      .eq("id", user.id)
+      .single();
 
-  if (error || !data) return null;
-  return data as Profile;
+    if (!error && data) {
+      return data as Profile;
+    }
+  } catch {
+    // Admin client may be unconfigured in environments where only user client is available
+  }
+
+  // 2. Fallback to authenticated user client (RLS policy allows selecting own profile row)
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", user.id)
+      .single();
+
+    if (!error && data) {
+      return data as Profile;
+    }
+  } catch {
+    // User client query failed
+  }
+
+  return null;
 }
 
 export class UnauthorizedError extends Error {

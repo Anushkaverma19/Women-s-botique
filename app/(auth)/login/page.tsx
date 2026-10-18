@@ -14,7 +14,12 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [formError, setFormError] = useState<string | null>(null);
+  const urlError = searchParams.get("error");
+  const initialError =
+    urlError === "auth_callback_failed"
+      ? "Verification link expired or invalid. Please sign in directly or request a new link."
+      : null;
+  const [formError, setFormError] = useState<string | null>(initialError);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -34,23 +39,54 @@ export default function LoginPage() {
     }
 
     setLoading(true);
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword(parsed.data);
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.auth.signInWithPassword(parsed.data);
 
-    if (error) {
+      if (error) {
+        setLoading(false);
+        const msg = error.message ? error.message.toLowerCase() : "";
+        if (
+          error.code === "email_not_confirmed" ||
+          msg.includes("email not confirmed")
+        ) {
+          setFormError(
+            "Please verify your email address before signing in. Check your inbox for the confirmation link."
+          );
+        } else if (
+          error.status === 429 ||
+          msg.includes("too many requests") ||
+          msg.includes("rate limit")
+        ) {
+          setFormError(
+            "Too many sign-in attempts. Please wait a minute and try again."
+          );
+        } else if (
+          error.code === "invalid_credentials" ||
+          msg.includes("invalid login credentials")
+        ) {
+          setFormError("Incorrect email or password. Please try again.");
+        } else {
+          setFormError(error.message || "Failed to sign in. Please try again.");
+        }
+        return;
+      }
+
+      if (data?.session) {
+        // Ensure session state is active before triggering page navigation
+        await supabase.auth.getSession();
+      }
+
       setLoading(false);
-      setFormError("Incorrect email or password.");
-      return;
+
+      const redirectTo = searchParams.get("redirectTo") || "/account";
+      window.location.assign(redirectTo);
+    } catch (err: unknown) {
+      setLoading(false);
+      setFormError(
+        err instanceof Error ? err.message : "An unexpected error occurred during sign in."
+      );
     }
-
-    // Give Supabase browser client a short time to persist auth cookies
-    // to prevent race conditions with Next.js Server Components.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    setLoading(false);
-
-    const redirectTo = searchParams.get("redirectTo") || "/account";
-    window.location.href = redirectTo;
   }
 
   return (

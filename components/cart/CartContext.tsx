@@ -54,7 +54,15 @@ export function CartProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    refresh();
+    let ignore = false;
+    Promise.resolve().then(() => {
+      if (!ignore) {
+        refresh();
+      }
+    });
+    return () => {
+      ignore = true;
+    };
   }, [refresh]);
 
   const addItem = useCallback(
