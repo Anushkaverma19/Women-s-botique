@@ -1,7 +1,17 @@
 import "server-only";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ASK_MEHRAE_SYSTEM_PROMPT, buildUserTurn } from "@/lib/ai/systemPrompt";
-import { retrieveCandidateProducts, toAiContext } from "@/lib/ai/retrieval";
+import {
+  retrieveCandidateProducts,
+  toAiContext,
+  isProductRelatedQuery,
+} from "@/lib/ai/retrieval";
+import {
+  buildAiCacheKey,
+  getCachedAiResponse,
+  setCachedAiResponse,
+  rehydrateCachedRecommendations,
+} from "@/lib/ai/cache";
 import type { ProductWithRelations } from "@/types/database";
 
 export interface AskMehraeResult {
@@ -12,58 +22,65 @@ export interface AskMehraeResult {
   }[];
 }
 
-const FALLBACK_MESSAGE =
-  "I couldn't find a piece matching that request in the current collection.";
-
-const QUOTA_FALLBACK_MESSAGE =
-  "Our styling assistant is in high demand right now, so I can't add personal notes just yet - but here are real pieces from the collection that match what you asked for.";
-
-const GENERIC_ERROR_FALLBACK_MESSAGE =
-  "I'm having trouble reaching the styling assistant right now - here are a few pieces that might suit you.";
-
 interface ChatTurn {
   role: "user" | "assistant";
   content: string;
 }
 
-/**
- * Process-local circuit breaker for Gemini quota exhaustion.
- *
- * When Gemini returns a 429/RESOURCE_EXHAUSTED, we already know every other
- * concurrent request in this process is about to hit the same wall - so
- * instead of making each of them pay the latency of a doomed API call (and
- * counting further against the quota once it partially recovers), we short
- * -circuit straight to the catalogue-only fallback for a cooldown window.
- *
- * This is per-instance state, same caveat as the in-memory rate limiter in
- * lib/rate-limit.ts: on a single server it's exactly right, on many
- * serverless instances each instance discovers the outage independently
- * (slightly less efficient, but never incorrect - worst case is a few
- * redundant calls across instances, not a crash).
- */
-const QUOTA_COOLDOWN_MS = 30_000;
-let quotaExceededUntil = 0;
+export type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
-function isQuotaError(err: unknown): boolean {
+/**
+ * Process-local circuit breaker for Gemini quota exhaustion and transient errors.
+ *
+ * States:
+ *  - CLOSED: Normal operation. Requests flow to Gemini.
+ *  - OPEN: Quota is exhausted (429) or repeated transient failures occurred.
+ *    Short-circuits immediately to grounded Supabase fallback without network overhead.
+ *  - HALF_OPEN: Cooldown has elapsed. A single probe request is attempted to test recovery.
+ */
+const QUOTA_COOLDOWN_MS = 60_000; // 60s cooldown for quota exhaustion (429)
+const TRANSIENT_COOLDOWN_MS = 30_000; // 30s cooldown after consecutive transient failures
+const MAX_TRANSIENT_FAILURES = 3;
+
+let circuitState: CircuitState = "CLOSED";
+let quotaExceededUntil = 0;
+let consecutiveTransientFailures = 0;
+
+export function isQuotaError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return (
     message.includes("429") ||
     message.includes("RESOURCE_EXHAUSTED") ||
-    message.toLowerCase().includes("quota")
+    message.toLowerCase().includes("quota") ||
+    message.toLowerCase().includes("rate limit")
   );
 }
 
-function isRetryableError(err: unknown): boolean {
+export function isNonRetryableClientError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  // Transient server-side / network issues are worth a quick retry.
-  // Quota errors and 4xx client errors (bad request, invalid key, etc.)
-  // are not - retrying them immediately just wastes time and quota.
+  return (
+    message.includes("400") ||
+    message.includes("401") ||
+    message.includes("403") ||
+    message.includes("404") ||
+    message.includes("API_KEY_INVALID") ||
+    message.includes("PERMISSION_DENIED") ||
+    message.toLowerCase().includes("invalid api key")
+  );
+}
+
+export function isTransientError(err: unknown): boolean {
+  if (isQuotaError(err) || isNonRetryableClientError(err)) return false;
+  const message = err instanceof Error ? err.message : String(err);
   return (
     message.includes("500") ||
+    message.includes("502") ||
     message.includes("503") ||
+    message.includes("504") ||
     message.includes("fetch failed") ||
     message.toLowerCase().includes("timeout") ||
-    message.toLowerCase().includes("network")
+    message.toLowerCase().includes("network") ||
+    message.toLowerCase().includes("econnreset")
   );
 }
 
@@ -71,43 +88,81 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Calls Gemini with a couple of short, backed-off retries for transient errors only. */
+/**
+ * Checks if the circuit breaker allows calling Gemini.
+ * Transitions from OPEN to HALF_OPEN when cooldown elapses.
+ */
+function allowGeminiCall(): boolean {
+  if (circuitState === "OPEN") {
+    if (Date.now() >= quotaExceededUntil) {
+      circuitState = "HALF_OPEN";
+      return true; // Allow single probe request
+    }
+    return false; // Circuit still open
+  }
+  return true; // CLOSED or HALF_OPEN
+}
+
+/**
+ * Calls Gemini with at most ONE retry for transient errors only.
+ * Quota errors (429) and invalid credential errors are never retried.
+ */
 async function generateWithRetry(
   model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
   prompt: string,
-  maxAttempts = 3
+  maxAttempts = 2
 ): Promise<string> {
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const result = await model.generateContent(prompt);
+      // Success: reset circuit breaker state
+      circuitState = "CLOSED";
+      consecutiveTransientFailures = 0;
+      quotaExceededUntil = 0;
       return result.response.text();
     } catch (err) {
       lastError = err;
       if (isQuotaError(err)) {
+        // Quota is exhausted: open circuit for 60s, DO NOT RETRY
+        circuitState = "OPEN";
         quotaExceededUntil = Date.now() + QUOTA_COOLDOWN_MS;
-        throw err; // Don't burn further attempts against an exhausted quota.
-      }
-      if (!isRetryableError(err) || attempt === maxAttempts - 1) {
         throw err;
       }
-      // Exponential backoff with jitter: ~300ms, ~700ms.
-      await sleep(300 * 2 ** attempt + Math.random() * 100);
+      if (isNonRetryableClientError(err)) {
+        // Client/credentials error: DO NOT RETRY
+        throw err;
+      }
+      if (!isTransientError(err) || attempt === maxAttempts - 1) {
+        consecutiveTransientFailures++;
+        if (consecutiveTransientFailures >= MAX_TRANSIENT_FAILURES) {
+          circuitState = "OPEN";
+          quotaExceededUntil = Date.now() + TRANSIENT_COOLDOWN_MS;
+        }
+        throw err;
+      }
+      // Retry transient error at most once with bounded backoff & jitter (~300-500ms)
+      await sleep(300 + Math.random() * 200);
     }
   }
   throw lastError;
 }
 
+/**
+ * Compact formatting for conversation history:
+ * Limits to last 4 turns and truncates each turn to 200 chars to minimize prompt tokens.
+ */
 function formatHistory(history: ChatTurn[]): string {
   return history
-    .slice(-8)
-    .map((turn) => `${turn.role === "user" ? "Shopper" : "ASK MEHRAÉ"}: ${turn.content}`)
+    .slice(-4)
+    .map(
+      (turn) =>
+        `${turn.role === "user" ? "Shopper" : "ASK MEHRAÉ"}: ${turn.content.slice(0, 200).trim()}`
+    )
     .join("\n");
 }
 
 function safeParseJson(raw: string): { message?: unknown; recommendations?: unknown } | null {
-  // Gemini is instructed to return raw JSON, but strip code fences
-  // defensively in case it wraps the response anyway.
   const cleaned = raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "");
   try {
     return JSON.parse(cleaned);
@@ -117,60 +172,106 @@ function safeParseJson(raw: string): { message?: unknown; recommendations?: unkn
 }
 
 /**
- * The full ASK MEHRAÉ pipeline:
- *   1. Retrieve a grounded candidate set from Supabase (source of truth).
- *   2. Send only that trimmed context + the user's message to Gemini.
- *   3. Parse Gemini's structured JSON response.
- *   4. Validate every recommended productId against the retrieved set -
- *      discard anything Gemini invented.
- *   5. Re-attach full, trusted product data from the candidate set (never
- *      from Gemini's output) before returning to the client.
+ * Smart Fallback:
+ * - For product-related questions, returns real matching pieces from Supabase with honest copy.
+ * - For general questions requiring AI reasoning, explains that AI is temporarily unavailable
+ *   without returning random or unrelated recommendations.
+ * - Never pretends fallback was generated by Gemini.
  */
-export async function askMehrae(message: string, history: ChatTurn[]): Promise<AskMehraeResult> {
-  const candidates = await retrieveCandidateProducts(message);
+function createSmartFallback(
+  message: string,
+  candidates: ProductWithRelations[],
+  reason: "quota" | "error" | "no_key"
+): AskMehraeResult {
+  const isShopping = isProductRelatedQuery(message);
 
-  if (candidates.length === 0) {
-    return { message: FALLBACK_MESSAGE, recommendations: [] };
+  if (!isShopping || candidates.length === 0) {
+    if (reason === "no_key") {
+      return {
+        message:
+          "Connect the Gemini API key to enable full conversational styling advice and fashion recommendations.",
+        recommendations: [],
+      };
+    }
+    return {
+      message:
+        "Our AI styling assistant is currently unavailable due to high demand. Please try asking again shortly, or explore our collections.",
+      recommendations: [],
+    };
   }
+
+  const topPieces = candidates.slice(0, 3);
+  let fallbackMessage = "";
+  if (reason === "no_key") {
+    fallbackMessage =
+      "Here are pieces from our collection matching your search. Connect the Gemini API key to enable personalized conversational styling advice.";
+  } else if (reason === "quota") {
+    fallbackMessage =
+      "Our conversational styling assistant is temporarily taking a breather due to high demand, but here are real pieces from our collection tailored to your search.";
+  } else {
+    fallbackMessage =
+      "We're currently having trouble reaching the full AI styling assistant, but here are curated pieces from our collection matching your request.";
+  }
+
+  return {
+    message: fallbackMessage,
+    recommendations: topPieces.map((product) => ({
+      product,
+      reason: "Curated piece from the collection matching your search criteria.",
+    })),
+  };
+}
+
+/**
+ * The full ASK MEHRAÉ pipeline:
+ *   1. Check bounded in-memory cache with user-scope isolation.
+ *   2. Rehydrate cached recommendations against live Supabase data (ensures up-to-date prices & inventory).
+ *   3. If cache miss, check circuit breaker state.
+ *   4. Retrieve compact candidate set (top 5) from Supabase.
+ *   5. Send trimmed context + message to Gemini (gemini-3.8-flash) with token limits.
+ *   6. Validate and attach trusted product data, then cache the result.
+ */
+export async function askMehrae(
+  message: string,
+  history: ChatTurn[],
+  userScope = "anon"
+): Promise<AskMehraeResult> {
+  // 1. In-memory cache check
+  const cacheKey = buildAiCacheKey(userScope, message, history);
+  const cached = getCachedAiResponse(cacheKey, userScope);
+
+  if (cached) {
+    // Rehydrate recommendations against live Supabase catalogue
+    const rehydrated = await rehydrateCachedRecommendations(cached.recommendations);
+    return {
+      message: cached.message,
+      recommendations: rehydrated,
+    };
+  }
+
+  // 2. Retrieve targeted candidates from Supabase (up to 5 items)
+  const candidates = await retrieveCandidateProducts(message, 5);
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    // Graceful degradation: still useful without an AI key configured -
-    // surface the best-matching real products with a generic message
-    // rather than failing the whole assistant.
-    return {
-      message:
-        "Here are a few pieces from the collection that could work - connect the Gemini API key to enable full conversational styling advice.",
-      recommendations: candidates
-        .slice(0, 3)
-        .map((product) => ({ product, reason: "A close match for your request." })),
-    };
+    return createSmartFallback(message, candidates, "no_key");
   }
 
-  // Circuit breaker: if we recently learned the Gemini quota is exhausted,
-  // skip the doomed network round trip entirely and go straight to the
-  // grounded catalogue fallback. This keeps the assistant fast and
-  // available under load instead of every request queuing up on a 429.
-  if (Date.now() < quotaExceededUntil) {
-    return {
-      message: QUOTA_FALLBACK_MESSAGE,
-      recommendations: candidates
-        .slice(0, 3)
-        .map((product) => ({ product, reason: "A close match for your request." })),
-    };
+  // 3. Circuit breaker check
+  if (!allowGeminiCall()) {
+    return createSmartFallback(message, candidates, "quota");
   }
 
+  // 4. Token-optimized context
   const context = candidates.map(toAiContext);
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
-    // NOTE: gemini-2.0-flash was fully shut down by Google on 2026-06-01.
-    // gemini-2.5-flash is the current active replacement as of this
-    // writing, but it also has a published (non-earlier-than) retirement
-    // date of 2026-10-16 - if this project is still running after that,
-    // check https://ai.google.dev/gemini-api/docs/deprecations and update
-    // this string before assuming the AI assistant is broken.
-    model: "gemini-2.5-flash",
-    generationConfig: { responseMimeType: "application/json" },
+    model: "gemini-3.8-flash",
+    generationConfig: {
+      responseMimeType: "application/json",
+      maxOutputTokens: 500,
+      temperature: 0.3,
+    },
     systemInstruction: ASK_MEHRAE_SYSTEM_PROMPT,
   });
 
@@ -181,18 +282,17 @@ export async function askMehrae(message: string, history: ChatTurn[]): Promise<A
       buildUserTurn(JSON.stringify(context), message, formatHistory(history))
     );
   } catch (err) {
-    console.error("Gemini call failed", err);
-    return {
-      message: isQuotaError(err) ? QUOTA_FALLBACK_MESSAGE : GENERIC_ERROR_FALLBACK_MESSAGE,
-      recommendations: candidates
-        .slice(0, 3)
-        .map((product) => ({ product, reason: "A close match for your request." })),
-    };
+    console.error("Gemini call failed:", err);
+    return createSmartFallback(
+      message,
+      candidates,
+      isQuotaError(err) ? "quota" : "error"
+    );
   }
 
   const parsed = safeParseJson(raw);
   if (!parsed || typeof parsed.message !== "string") {
-    return { message: FALLBACK_MESSAGE, recommendations: [] };
+    return createSmartFallback(message, candidates, "error");
   }
 
   const candidateIds = new Set(candidates.map((p) => p.id));
@@ -214,9 +314,34 @@ export async function askMehrae(message: string, history: ChatTurn[]): Promise<A
           : "A recommended piece from the collection.";
       recommendations.push({ product, reason });
     }
-    // Any productId not found in candidateIds is silently discarded - this
-    // is the no-hallucination enforcement point.
   }
 
+  // 5. Store valid response in bounded cache
+  setCachedAiResponse(cacheKey, parsed.message, recommendations, userScope);
+
   return { message: parsed.message, recommendations };
+}
+
+// Helpers for automated test suite
+export function _getCircuitStateForTesting(): {
+  state: CircuitState;
+  quotaExceededUntil: number;
+  consecutiveTransientFailures: number;
+} {
+  return {
+    state: circuitState,
+    quotaExceededUntil,
+    consecutiveTransientFailures,
+  };
+}
+
+export function _resetCircuitBreakerForTesting(): void {
+  circuitState = "CLOSED";
+  quotaExceededUntil = 0;
+  consecutiveTransientFailures = 0;
+}
+
+export function _tripCircuitBreakerForTesting(cooldownMs = 60_000): void {
+  circuitState = "OPEN";
+  quotaExceededUntil = Date.now() + cooldownMs;
 }

@@ -101,9 +101,80 @@ function extractCategorySlug(message: string): string | null {
   return null;
 }
 
+const FASHION_KEYWORDS = [
+  "saree",
+  "sari",
+  "lehenga",
+  "lehnga",
+  "lengha",
+  "dress",
+  "gown",
+  "jewellery",
+  "jewelry",
+  "necklace",
+  "earring",
+  "bangle",
+  "suit",
+  "anarkali",
+  "dupatta",
+  "fabric",
+  "silk",
+  "cotton",
+  "velvet",
+  "chiffon",
+  "georgette",
+  "organza",
+  "crepe",
+  "zari",
+  "embroidery",
+  "wedding",
+  "bridal",
+  "reception",
+  "mehendi",
+  "sangeet",
+  "festive",
+  "diwali",
+  "cocktail",
+  "party",
+  "formal",
+  "casual",
+  "price",
+  "under",
+  "budget",
+  "cost",
+  "inr",
+  "rupees",
+  "collection",
+  "wear",
+  "outfit",
+  "attire",
+  "style",
+  "recommend",
+  "show",
+  "buy",
+  "shop",
+  "looking for",
+  "piece",
+  "pieces",
+];
+
+/**
+ * Checks whether user message is asking for products, apparel, or shopping advice.
+ */
+export function isProductRelatedQuery(message: string): boolean {
+  const norm = message.toLowerCase();
+  return (
+    Boolean(extractCategorySlug(message)) ||
+    Boolean(extractOccasion(message)) ||
+    Boolean(extractColor(message)) ||
+    Boolean(extractMaxPrice(message)) ||
+    FASHION_KEYWORDS.some((kw) => norm.includes(kw))
+  );
+}
+
 export async function retrieveCandidateProducts(
   message: string,
-  limit = 12
+  limit = 6
 ): Promise<ProductWithRelations[]> {
   const supabase = await createClient();
 
@@ -194,7 +265,8 @@ export async function retrieveCandidateProducts(
     }
   }
 
-  if (products.length === 0 && !hasExplicitFilter) {
+  // Only fall back to featured products if user message actually has shopping intent
+  if (products.length === 0 && isProductRelatedQuery(message)) {
     const { data: featured } = await supabase
       .from("products")
       .select(
@@ -217,25 +289,23 @@ export async function retrieveCandidateProducts(
 
 /**
  * Strips a product down to only what Gemini needs to reason and never leaks
- * internal fields.
- *
- * MUST stay a structured object with a literal `productId` field: the
- * system prompt (lib/ai/systemPrompt.ts) explicitly tells Gemini "PRODUCT
- * CONTEXT ... as JSON" and instructs it to copy "productId" exactly from
- * this context. A prior revision of this function returned a formatted
- * multi-line string per product (with the id on an "ID:" line instead of a
- * `productId` field), which silently broke that contract - Gemini had to
- * infer the field name and hand-transcribe a UUID out of prose instead of
- * copying a clean field, which is why recommendations were only right
- * *some* of the time. Keep this as a plain object.
+ * internal fields. Trims description for optimal token usage.
  */
 export function toAiContext(product: ProductWithRelations) {
   const inStock = product.variants.some((v) => v.active && v.stock_quantity > 0);
+  const compactDescription = (
+    product.short_description ||
+    product.description ||
+    ""
+  )
+    .slice(0, 140)
+    .trim();
+
   return {
     productId: product.id,
     name: product.name,
     category: product.category?.name ?? "",
-    description: product.description,
+    description: compactDescription,
     price: product.base_price,
     colorFamily: product.color_family,
     material: product.material,
