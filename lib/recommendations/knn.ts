@@ -4,7 +4,7 @@ import type { ProductWithRelations } from "@/types/database";
  * Standard fabric & weave dictionary identified from MEHRAÉ's catalogue materials.
  * Used for multi-hot feature encoding of the fabric/material attribute.
  */
-const KNOWN_FABRICS = [
+export const KNOWN_FABRICS = [
   "silk",
   "organza",
   "crepe",
@@ -21,26 +21,16 @@ const KNOWN_FABRICS = [
 ] as const;
 
 /**
- * Feature weights balancing categorical and numerical influence:
- * - Category: Strong structural alignment for garment type
- * - Fabric: Texture and weave compatibility
- * - Colour: Visual tone affinity
- * - Price: Economic band alignment (min-max scaled)
+ * Feature weights for same-category similarity ranking:
+ * - Fabric: Texture, weave, and craftsmanship compatibility
+ * - Colour: Visual palette affinity
+ * - Price: Economic band alignment (min-max scaled to [0, 1])
  */
-const FEATURE_WEIGHTS = {
-  category: 2.0,
+export const FEATURE_WEIGHTS = {
   fabric: 1.0,
   colour: 1.0,
   price: 1.0,
 };
-
-/**
- * Cutoff distance threshold for suitable matches.
- * Distance between mismatched categories starts around ~2.83+,
- * so a threshold of 2.8 ensures we return only genuinely suitable matches.
- * If fewer than 5 suitable products exist, only the available matches are shown.
- */
-const MAX_SUITABILITY_DISTANCE = 2.8;
 
 export interface ProductSimilarityScore {
   product: ProductWithRelations;
@@ -48,45 +38,86 @@ export interface ProductSimilarityScore {
 }
 
 /**
- * Computes a weighted, normalized numerical feature vector for a MEHRAÉ product.
- * Features used:
- *  - Category (One-Hot Encoded)
+ * Normalizes a category string value (lowercased, trimmed, hyphens/underscores uniform).
+ */
+export function normalizeCategoryValue(value?: string | null): string {
+  if (!value) return "";
+  return value.toLowerCase().trim().replace(/[-_\s]+/g, " ");
+}
+
+/**
+ * Checks whether two products belong to the exact same category.
+ * Inspects:
+ *  1. category_id equality (UUID)
+ *  2. category.id equality
+ *  3. normalized category.slug equality
+ *  4. normalized category.name equality
+ */
+export function isSameCategory(
+  productA: Pick<ProductWithRelations, "category_id"> & {
+    category?: { id?: string; slug?: string; name?: string } | null;
+  },
+  productB: Pick<ProductWithRelations, "category_id"> & {
+    category?: { id?: string; slug?: string; name?: string } | null;
+  }
+): boolean {
+  // 1. Direct category_id match
+  if (productA.category_id && productB.category_id && productA.category_id === productB.category_id) {
+    return true;
+  }
+  if (productA.category?.id && productB.category?.id && productA.category.id === productB.category.id) {
+    return true;
+  }
+
+  // 2. Normalized slug match
+  const slugA = normalizeCategoryValue(productA.category?.slug);
+  const slugB = normalizeCategoryValue(productB.category?.slug);
+  if (slugA && slugB && slugA === slugB) {
+    return true;
+  }
+
+  // 3. Normalized name match
+  const nameA = normalizeCategoryValue(productA.category?.name);
+  const nameB = normalizeCategoryValue(productB.category?.name);
+  if (nameA && nameB && nameA === nameB) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Computes a weighted, normalized numerical feature vector for products
+ * within the same category:
  *  - Colour (One-Hot Encoded from `color_family`)
  *  - Fabric (Multi-Hot Encoded from `material`)
- *  - Price (Min-Max Scaled from `base_price`)
+ *  - Price (Min-Max Scaled from `base_price` within category bounds)
  */
 export function buildProductFeatureVector(
   product: ProductWithRelations,
-  allCategories: string[],
   allColors: string[],
   minPrice: number,
   maxPrice: number
 ): number[] {
-  // 1. Category One-Hot Encoding
-  const catSlug = product.category?.slug?.toLowerCase() || "";
-  const catVector = allCategories.map((c) =>
-    c === catSlug ? Math.sqrt(FEATURE_WEIGHTS.category) : 0
-  );
-
-  // 2. Colour One-Hot Encoding
+  // 1. Colour One-Hot Encoding
   const colorNorm = (product.color_family || "").toLowerCase().trim();
   const colorVector = allColors.map((col) =>
     col === colorNorm ? Math.sqrt(FEATURE_WEIGHTS.colour) : 0
   );
 
-  // 3. Fabric Multi-Hot Encoding (matching known catalogue textiles)
+  // 2. Fabric Multi-Hot Encoding (matching known catalogue textiles)
   const materialNorm = (product.material || "").toLowerCase();
   const fabricVector = KNOWN_FABRICS.map((fabric) =>
     materialNorm.includes(fabric) ? Math.sqrt(FEATURE_WEIGHTS.fabric) : 0
   );
 
-  // 4. Numerical Price Scaling (Min-Max scaled to [0, 1])
+  // 3. Numerical Price Scaling (Min-Max scaled to [0, 1])
   const priceRange = maxPrice - minPrice;
   const scaledPrice =
     priceRange > 0 ? (product.base_price - minPrice) / priceRange : 0.5;
   const priceFeature = scaledPrice * Math.sqrt(FEATURE_WEIGHTS.price);
 
-  return [...catVector, ...colorVector, ...fabricVector, priceFeature];
+  return [...colorVector, ...fabricVector, priceFeature];
 }
 
 /**
@@ -112,85 +143,75 @@ export function euclideanDistance(vecA: number[], vecB: number[]): number {
  * Finds up to K nearest neighbor similar products from the MEHRAÉ catalogue using KNN.
  *
  * Requirements:
- * - Uses ONLY actual catalogue products (no synthetic/fake products).
+ * - Strictly filters products by the current product's category BEFORE applying KNN ranking.
+ *   (e.g., if target is a Dress, ONLY Dresses are evaluated).
  * - Excludes the currently viewed target product.
- * - Encodes categorical fields (category, colour, fabric) & scales price appropriately.
+ * - Encodes categorical fields (colour, fabric) & scales numerical price appropriately.
  * - Employs Euclidean distance over the normalized feature space.
- * - If fewer than K suitable products exist in the catalogue, returns only available matches.
+ * - Returns up to K results, or fewer if fewer same-category products exist.
+ * - Never returns products from different categories or fake recommendations.
  */
 export function findKNearestSimilarProducts(
   targetProduct: ProductWithRelations,
   catalogue: ProductWithRelations[],
-  k: number = 5,
-  maxDistanceThreshold: number = MAX_SUITABILITY_DISTANCE
+  k: number = 5
 ): ProductWithRelations[] {
   if (!targetProduct || !catalogue || catalogue.length === 0) {
     return [];
   }
 
-  // 1. Exclude the target product itself
-  const candidates = catalogue.filter((p) => p.id !== targetProduct.id);
-  if (candidates.length === 0) {
+  // 1. Strictly filter products by SAME CATEGORY and exclude target product BEFORE KNN
+  const sameCategoryCandidates = catalogue.filter(
+    (candidate) =>
+      candidate.id !== targetProduct.id &&
+      candidate.slug !== targetProduct.slug &&
+      isSameCategory(targetProduct, candidate)
+  );
+
+  // If no other products exist in this category, return empty list
+  if (sameCategoryCandidates.length === 0) {
     return [];
   }
 
-  // 2. Discover distinct categorical domains and price range across full catalogue
-  const allProducts = [targetProduct, ...candidates];
-
-  const allCategories = Array.from(
-    new Set(
-      allProducts
-        .map((p) => p.category?.slug?.toLowerCase() || "")
-        .filter(Boolean)
-    )
-  ).sort();
+  // 2. Discover distinct color families and price bounds within the same-category pool
+  const pool = [targetProduct, ...sameCategoryCandidates];
 
   const allColors = Array.from(
     new Set(
-      allProducts
+      pool
         .map((p) => (p.color_family || "").toLowerCase().trim())
         .filter(Boolean)
     )
   ).sort();
 
-  const prices = allProducts.map((p) => p.base_price);
+  const prices = pool.map((p) => p.base_price);
   const minPrice = Math.min(...prices);
   const maxPrice = Math.max(...prices);
 
   // 3. Vectorize target product
   const targetVector = buildProductFeatureVector(
     targetProduct,
-    allCategories,
     allColors,
     minPrice,
     maxPrice
   );
 
-  // 4. Compute distances to all candidates
-  const scoredCandidates: ProductSimilarityScore[] = candidates.map((candidate) => {
-    const candidateVector = buildProductFeatureVector(
-      candidate,
-      allCategories,
-      allColors,
-      minPrice,
-      maxPrice
-    );
-    const distance = euclideanDistance(targetVector, candidateVector);
-    return { product: candidate, distance };
-  });
+  // 4. Compute KNN Euclidean distances to all same-category candidates
+  const scoredCandidates: ProductSimilarityScore[] = sameCategoryCandidates.map(
+    (candidate) => {
+      const candidateVector = buildProductFeatureVector(
+        candidate,
+        allColors,
+        minPrice,
+        maxPrice
+      );
+      const distance = euclideanDistance(targetVector, candidateVector);
+      return { product: candidate, distance };
+    }
+  );
 
-  // 5. Filter for suitable matches (within max suitability distance) and sort ascending
-  const suitableCandidates = scoredCandidates
-    .filter((entry) => entry.distance <= maxDistanceThreshold)
-    .sort((a, b) => a.distance - b.distance);
+  // 5. Sort ascending by similarity distance (closest match first) and take up to k
+  scoredCandidates.sort((a, b) => a.distance - b.distance);
 
-  // If suitable candidates are found, take up to k;
-  // If strict threshold yielded nothing (e.g. extremely isolated single-item category),
-  // fallback gracefully to nearest candidates without generating fake data
-  const finalMatches =
-    suitableCandidates.length > 0
-      ? suitableCandidates.slice(0, k)
-      : scoredCandidates.sort((a, b) => a.distance - b.distance).slice(0, k);
-
-  return finalMatches.map((entry) => entry.product);
+  return scoredCandidates.slice(0, k).map((entry) => entry.product);
 }

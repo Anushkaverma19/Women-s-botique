@@ -20,13 +20,10 @@ const KNOWN_FABRICS = [
 ] as const;
 
 const FEATURE_WEIGHTS = {
-  category: 2.0,
   fabric: 1.0,
   colour: 1.0,
   price: 1.0,
 };
-
-const MAX_SUITABILITY_DISTANCE = 2.8;
 
 interface TestProduct {
   id: string;
@@ -35,21 +32,41 @@ interface TestProduct {
   base_price: number;
   material: string;
   color_family: string;
-  category?: { name: string; slug: string } | null;
+  category_id?: string;
+  category?: { id?: string; name?: string; slug?: string } | null;
+}
+
+function normalizeCategoryValue(value?: string | null): string {
+  if (!value) return "";
+  return value.toLowerCase().trim().replace(/[-_\s]+/g, " ");
+}
+
+function isSameCategory(productA: TestProduct, productB: TestProduct): boolean {
+  if (productA.category_id && productB.category_id && productA.category_id === productB.category_id) {
+    return true;
+  }
+  if (productA.category?.id && productB.category?.id && productA.category.id === productB.category.id) {
+    return true;
+  }
+  const slugA = normalizeCategoryValue(productA.category?.slug);
+  const slugB = normalizeCategoryValue(productB.category?.slug);
+  if (slugA && slugB && slugA === slugB) {
+    return true;
+  }
+  const nameA = normalizeCategoryValue(productA.category?.name);
+  const nameB = normalizeCategoryValue(productB.category?.name);
+  if (nameA && nameB && nameA === nameB) {
+    return true;
+  }
+  return false;
 }
 
 function buildProductFeatureVector(
   product: TestProduct,
-  allCategories: string[],
   allColors: string[],
   minPrice: number,
   maxPrice: number
 ): number[] {
-  const catSlug = product.category?.slug?.toLowerCase() || "";
-  const catVector = allCategories.map((c) =>
-    c === catSlug ? Math.sqrt(FEATURE_WEIGHTS.category) : 0
-  );
-
   const colorNorm = (product.color_family || "").toLowerCase().trim();
   const colorVector = allColors.map((col) =>
     col === colorNorm ? Math.sqrt(FEATURE_WEIGHTS.colour) : 0
@@ -65,7 +82,7 @@ function buildProductFeatureVector(
     priceRange > 0 ? (product.base_price - minPrice) / priceRange : 0.5;
   const priceFeature = scaledPrice * Math.sqrt(FEATURE_WEIGHTS.price);
 
-  return [...catVector, ...colorVector, ...fabricVector, priceFeature];
+  return [...colorVector, ...fabricVector, priceFeature];
 }
 
 function euclideanDistance(vecA: number[], vecB: number[]): number {
@@ -80,38 +97,39 @@ function euclideanDistance(vecA: number[], vecB: number[]): number {
 function findKNearestSimilarProducts(
   targetProduct: TestProduct,
   catalogue: TestProduct[],
-  k: number = 5,
-  maxDistanceThreshold: number = MAX_SUITABILITY_DISTANCE
+  k: number = 5
 ): TestProduct[] {
-  const candidates = catalogue.filter((p) => p.id !== targetProduct.id);
-  if (candidates.length === 0) return [];
+  // STRICT CATEGORY FILTER & SELF-EXCLUSION BEFORE KNN
+  const sameCategoryCandidates = catalogue.filter(
+    (candidate) =>
+      candidate.id !== targetProduct.id &&
+      candidate.slug !== targetProduct.slug &&
+      isSameCategory(targetProduct, candidate)
+  );
 
-  const allProducts = [targetProduct, ...candidates];
+  if (sameCategoryCandidates.length === 0) {
+    return [];
+  }
 
-  const allCategories = Array.from(
-    new Set(allProducts.map((p) => p.category?.slug?.toLowerCase() || "").filter(Boolean))
-  ).sort();
-
+  const pool = [targetProduct, ...sameCategoryCandidates];
   const allColors = Array.from(
-    new Set(allProducts.map((p) => (p.color_family || "").toLowerCase().trim()).filter(Boolean))
+    new Set(pool.map((p) => (p.color_family || "").toLowerCase().trim()).filter(Boolean))
   ).sort();
 
-  const prices = allProducts.map((p) => p.base_price);
+  const prices = pool.map((p) => p.base_price);
   const minPrice = Math.min(...prices);
   const maxPrice = Math.max(...prices);
 
   const targetVector = buildProductFeatureVector(
     targetProduct,
-    allCategories,
     allColors,
     minPrice,
     maxPrice
   );
 
-  const scoredCandidates = candidates.map((candidate) => {
+  const scoredCandidates = sameCategoryCandidates.map((candidate) => {
     const candidateVector = buildProductFeatureVector(
       candidate,
-      allCategories,
       allColors,
       minPrice,
       maxPrice
@@ -120,22 +138,14 @@ function findKNearestSimilarProducts(
     return { product: candidate, distance };
   });
 
-  const suitableCandidates = scoredCandidates
-    .filter((entry) => entry.distance <= maxDistanceThreshold)
-    .sort((a, b) => a.distance - b.distance);
-
-  const finalMatches =
-    suitableCandidates.length > 0
-      ? suitableCandidates.slice(0, k)
-      : scoredCandidates.sort((a, b) => a.distance - b.distance).slice(0, k);
-
-  return finalMatches.map((entry) => entry.product);
+  scoredCandidates.sort((a, b) => a.distance - b.distance);
+  return scoredCandidates.slice(0, k).map((entry) => entry.product);
 }
 
 async function main() {
-  console.log("==================================================");
-  console.log(" MEHRAÉ KNN Similar Products Verification Suite  ");
-  console.log("==================================================");
+  console.log("=========================================================");
+  console.log(" MEHRAÉ Strict Category KNN Similar Products Test Suite  ");
+  console.log("=========================================================");
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -149,7 +159,7 @@ async function main() {
 
   const { data, error } = await supabase
     .from("products")
-    .select("id, name, slug, base_price, material, color_family, category:categories(name, slug)")
+    .select("id, name, slug, base_price, material, color_family, category_id, category:categories(id, name, slug)")
     .eq("active", true);
 
   if (error || !data) {
@@ -157,7 +167,7 @@ async function main() {
     process.exit(1);
   }
 
-  const rawList = data as unknown as Array<TestProduct & { category?: { name: string; slug: string } | Array<{ name: string; slug: string }> }>;
+  const rawList = data as unknown as Array<TestProduct & { category?: { id?: string; name?: string; slug?: string } | Array<{ id?: string; name?: string; slug?: string }> }>;
   const catalogue: TestProduct[] = rawList.map((p) => ({
     id: p.id,
     name: p.name,
@@ -165,6 +175,7 @@ async function main() {
     base_price: p.base_price,
     material: p.material,
     color_family: p.color_family,
+    category_id: p.category_id,
     category: Array.isArray(p.category) ? p.category[0] : p.category,
   }));
 
@@ -172,32 +183,30 @@ async function main() {
 
   const testCases = [
     {
-      title: "Test Case 1: Mulberry Silk Saree with Zari Border",
-      slug: "noor-ivory-silk-saree",
-      expectedCategory: "sarees",
-    },
-    {
-      title: "Test Case 2: Emerald Silk Festive Lehenga",
-      slug: "kavya-emerald-festive-lehenga",
-      expectedCategory: "lehengas",
-    },
-    {
-      title: "Test Case 3: Emerald Satin Wrap Dress",
+      type: "Dress",
       slug: "vera-emerald-satin-wrap-dress",
-      expectedCategory: "dresses",
+      expectedCategorySlug: "dresses",
+      expectedExactCount: 2, // 3 total dresses - 1 target = 2 available
     },
     {
-      title: "Test Case 4: Bridal Kundan & Pearl Jewellery Set",
-      slug: "aafreen-bridal-jewellery-set",
-      expectedCategory: "jewellery",
+      type: "Saree",
+      slug: "noor-ivory-silk-saree",
+      expectedCategorySlug: "sarees",
+      expectedExactCount: 5, // 6 total sarees - 1 target = 5 available
+    },
+    {
+      type: "Lehenga",
+      slug: "kavya-emerald-festive-lehenga",
+      expectedCategorySlug: "lehengas",
+      expectedExactCount: 4, // 5 total lehengas - 1 target = 4 available
     },
   ];
 
   let allPassed = true;
 
   for (const tc of testCases) {
-    console.log(`--------------------------------------------------`);
-    console.log(tc.title);
+    console.log(`---------------------------------------------------------`);
+    console.log(`Verifying Target Product Type: ${tc.type}`);
     console.log(`Target Slug: ${tc.slug}`);
 
     const target = catalogue.find((p) => p.slug === tc.slug);
@@ -207,9 +216,12 @@ async function main() {
       continue;
     }
 
+    const targetCat = normalizeCategoryValue(target.category?.slug || target.category?.name);
+    console.log(`Target Category: ${targetCat} (from DB: ${target.category?.name})`);
+
     const similar = findKNearestSimilarProducts(target, catalogue, 5);
 
-    console.log(`Results Returned: ${similar.length} products`);
+    console.log(`Recommended Results Count: ${similar.length}`);
 
     // Check 1: Target product must NOT be in recommendations
     const containsSelf = similar.some((p) => p.id === target.id || p.slug === target.slug);
@@ -220,51 +232,46 @@ async function main() {
       console.log("PASS: Target product is excluded from recommendations.");
     }
 
-    // Check 2: All returned products must exist in catalogue
-    const catalogueIds = new Set(catalogue.map((p) => p.id));
-    const allExist = similar.every((p) => catalogueIds.has(p.id));
-    if (!allExist) {
-      console.error("FAIL: Some recommended products do not exist in catalogue!");
+    // Check 2: STRICT Category check — EVERY recommended product MUST belong to target's category
+    const anyCrossCategory = similar.some((p) => !isSameCategory(target, p));
+    if (anyCrossCategory) {
+      console.error(`FAIL: Cross-category recommendation detected! Expected only '${targetCat}'.`);
       allPassed = false;
     } else {
-      console.log("PASS: All displayed products exist in the MEHRAÉ catalogue.");
+      console.log(`PASS: 100% of recommendations belong strictly to category '${targetCat}'.`);
     }
 
-    // Check 3: At most 5 recommendations, and if fewer suitable exist, return available matches
+    // Check 3: Count check — up to 5, or exact available matches
     if (similar.length > 5) {
-      console.error(`FAIL: More than 5 recommendations returned (${similar.length}).`);
+      console.error(`FAIL: Exceeded max 5 items: returned ${similar.length}`);
+      allPassed = false;
+    } else if (similar.length !== tc.expectedExactCount) {
+      console.error(`FAIL: Expected exactly ${tc.expectedExactCount} available same-category items, got ${similar.length}`);
       allPassed = false;
     } else {
-      console.log(`PASS: Count constraint satisfied (${similar.length} <= 5).`);
+      console.log(`PASS: Correct count returned (${similar.length} items; all available same-category matches).`);
     }
 
-    // Check 4: For jewellery, only 1 other jewellery product exists in catalogue
-    if (tc.expectedCategory === "jewellery") {
-      if (similar.length === 1 && similar[0].slug === "aafreen-pearl-statement-earrings") {
-        console.log("PASS: Jewellery test returned only the 1 available catalogue match without fake padding.");
-      }
-    }
-
-    // Print matches
+    // Print recommendations
     similar.forEach((p, idx) => {
       console.log(
-        `  ${idx + 1}. ${p.name} | Cat: ${p.category?.name || "N/A"} | Color: ${p.color_family} | Material: ${p.material} | Price: ₹${p.base_price}`
+        `  ${idx + 1}. ${p.name} | Category: ${p.category?.name} | Color: ${p.color_family} | Material: ${p.material} | Price: ₹${p.base_price}`
       );
     });
   }
 
-  console.log(`==================================================`);
+  console.log(`=========================================================`);
   if (allPassed) {
-    console.log(" ALL KNN VERIFICATION CHECKS PASSED SUCCESSFULLY!");
-    console.log("==================================================");
+    console.log(" ALL STRICT CATEGORY KNN TESTS PASSED SUCCESSFULLY!     ");
+    console.log("=========================================================");
   } else {
     console.error(" SOME CHECKS FAILED.");
-    console.log("==================================================");
+    console.log("=========================================================");
     process.exit(1);
   }
 }
 
 main().catch((err) => {
-  console.error("Verification script error:", err);
+  console.error("Test suite runtime error:", err);
   process.exit(1);
 });
