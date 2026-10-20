@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getProductBySlug, getRelatedProducts } from "@/lib/products/queries";
+import { getProductBySlug, getSimilarProducts } from "@/lib/products/queries";
 import { Container } from "@/components/ui/primitives";
 import { ProductGallery } from "@/components/products/ProductGallery";
 import { AddToBagForm } from "@/components/products/AddToBagForm";
-import { RelatedProducts } from "@/components/products/RelatedProducts";
+import { SimilarProducts } from "@/components/products/SimilarProducts";
 import { StylingSuggestionButton } from "@/components/ai/StylingSuggestionButton";
 import { formatINR } from "@/lib/utils";
 
@@ -32,7 +32,7 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
   const product = await getProductBySlug(slug);
   if (!product) notFound();
 
-  const related = await getRelatedProducts(product);
+  const similarProducts = await getSimilarProducts(product, 5);
   const inStock = product.variants.some((v) => v.active && v.stock_quantity > 0);
 
   return (
@@ -89,7 +89,7 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
         </div>
       </div>
 
-      <RelatedProducts products={related} />
+      <SimilarProducts products={similarProducts} />
     </Container>
   );
 }

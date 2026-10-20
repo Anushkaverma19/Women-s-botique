@@ -13,9 +13,9 @@ export default async function AccountPage() {
   const profile = await getCurrentProfile();
   if (!profile) {
     return (
-      <Container className="py-12 max-w-2xl">
+      <Container className="py-12 max-w-4xl">
         <h1 className="font-display text-4xl mb-4">Account Profile</h1>
-        <div className="border border-charcoal/15 p-6 mb-8 space-y-3 text-sm">
+        <div className="border border-charcoal/15 p-6 mb-8 space-y-3 text-sm max-w-2xl">
           <div className="flex justify-between">
             <span className="text-charcoal/60">Email</span>
             <span>{user.email}</span>
@@ -24,7 +24,7 @@ export default async function AccountPage() {
             Your profile details could not be loaded at this time. Please contact support if this continues.
           </p>
         </div>
-        <div className="flex flex-wrap gap-4 items-center">
+        <div className="flex flex-wrap gap-4 items-center max-w-2xl">
           <Link href="/orders" className="eyebrow underline underline-offset-4">
             View Order History
           </Link>
@@ -37,9 +37,9 @@ export default async function AccountPage() {
   }
 
   return (
-    <Container className="py-12 max-w-2xl">
+    <Container className="py-12 max-w-4xl">
       <h1 className="font-display text-4xl mb-10">My Account</h1>
-      <div className="border border-charcoal/15 p-6 mb-8 space-y-3 text-sm">
+      <div className="border border-charcoal/15 p-6 mb-8 space-y-3 text-sm max-w-2xl">
         <div className="flex justify-between">
           <span className="text-charcoal/60">Name</span>
           <span>{profile.full_name || "—"}</span>
@@ -53,7 +53,7 @@ export default async function AccountPage() {
           <span className="capitalize">{profile.role}</span>
         </div>
       </div>
-      <div className="flex flex-wrap gap-4 items-center">
+      <div className="flex flex-wrap gap-4 items-center max-w-2xl">
         <Link href="/orders" className="eyebrow underline underline-offset-4">
           View Order History
         </Link>

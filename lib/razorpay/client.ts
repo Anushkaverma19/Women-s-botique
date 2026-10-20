@@ -1,6 +1,6 @@
 import "server-only";
+import crypto from "crypto";
 import Razorpay from "razorpay";
-import { validatePaymentVerification } from "razorpay/dist/utils/razorpay-utils";
 
 /**
  * Server-only Razorpay SDK instance.
@@ -9,17 +9,17 @@ import { validatePaymentVerification } from "razorpay/dist/utils/razorpay-utils"
  * imported from a client component, so RAZORPAY_KEY_SECRET can never end up
  * in the browser bundle - same pattern as lib/supabase/admin.ts.
  *
- * Only NEXT_PUBLIC_RAZORPAY_KEY_ID (the public key, needed by the browser to
- * open Razorpay Checkout) is ever exposed client-side; everything here stays
- * server-side.
+ * Checks both RAZORPAY_KEY_ID (recommended server env var) and
+ * NEXT_PUBLIC_RAZORPAY_KEY_ID (convenience fallback if set in .env.local).
  */
 export function getRazorpayClient() {
-  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keyId =
+    process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
 
   if (!keyId || !keySecret) {
     throw new Error(
-      "Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env.local."
+      "Razorpay is not configured. Set RAZORPAY_KEY_ID (or NEXT_PUBLIC_RAZORPAY_KEY_ID) and RAZORPAY_KEY_SECRET in .env.local."
     );
   }
 
@@ -27,17 +27,21 @@ export function getRazorpayClient() {
 }
 
 /**
+ * Constant-time string comparison using crypto.timingSafeEqual
+ * to prevent HMAC timing side-channel attacks.
+ */
+function constantTimeCompare(a: string, b: string): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
  * Verifies the signature Razorpay Checkout returns to the browser on
- * successful payment (HMAC-SHA256 of `order_id|payment_id`, keyed with the
- * account's key secret - NOT the webhook secret, a different key/scheme).
- * This is the SDK's own implementation, not a hand-rolled HMAC - see
- * node_modules/razorpay/dist/utils/razorpay-utils.js.
- *
- * A true result here is real proof of payment (only Razorpay could have
- * produced a signature that verifies with our secret key), so it's safe to
- * finalize the order from this path - but the webhook (verifyRazorpayWebhookSignature)
- * remains the durable backstop for when the browser never returns at all
- * (closed tab, crashed redirect, etc.).
+ * successful payment (HMAC-SHA256 of `order_id|payment_id`, keyed with key secret).
+ * Uses constant-time comparison to prevent timing attacks.
  */
 export function verifyRazorpayCheckoutSignature(params: {
   razorpayOrderId: string;
@@ -45,27 +49,38 @@ export function verifyRazorpayCheckoutSignature(params: {
   razorpaySignature: string;
 }): boolean {
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
-  if (!keySecret) return false;
+  if (
+    !keySecret ||
+    !params.razorpayOrderId ||
+    !params.razorpayPaymentId ||
+    !params.razorpaySignature
+  ) {
+    return false;
+  }
 
-  return validatePaymentVerification(
-    { order_id: params.razorpayOrderId, payment_id: params.razorpayPaymentId },
-    params.razorpaySignature,
-    keySecret
-  );
+  const payload = `${params.razorpayOrderId}|${params.razorpayPaymentId}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", keySecret)
+    .update(payload)
+    .digest("hex");
+
+  return constantTimeCompare(expectedSignature, params.razorpaySignature);
 }
 
 /**
  * Verifies an incoming webhook request's signature (HMAC-SHA256 of the raw
- * request body, keyed with the separate RAZORPAY_WEBHOOK_SECRET configured
- * in the Razorpay dashboard - not the same secret as above). `rawBody` MUST
- * be the exact, unparsed request text: re-serializing parsed JSON before
- * verifying is a common bug that breaks verification, since key order/
- * whitespace can differ byte-for-byte from what Razorpay actually sent and
- * signed.
+ * request body, keyed with RAZORPAY_WEBHOOK_SECRET). `rawBody` MUST
+ * be the exact, unparsed request text.
+ * Uses constant-time comparison to prevent timing attacks.
  */
 export function verifyRazorpayWebhookSignature(rawBody: string, signature: string): boolean {
   const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
-  if (!webhookSecret) return false;
+  if (!webhookSecret || !rawBody || !signature) return false;
 
-  return Razorpay.validateWebhookSignature(rawBody, signature, webhookSecret);
+  const expectedSignature = crypto
+    .createHmac("sha256", webhookSecret)
+    .update(rawBody)
+    .digest("hex");
+
+  return constantTimeCompare(expectedSignature, signature);
 }

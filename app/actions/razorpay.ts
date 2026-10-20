@@ -127,10 +127,24 @@ export async function createRazorpayOrder(
       razorpayOrderId: razorpayOrder.id,
       amount: Number(razorpayOrder.amount),
       currency: razorpayOrder.currency,
-      keyId: process.env.RAZORPAY_KEY_ID,
+      keyId:
+        process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
     };
   } catch (err) {
     console.error("Razorpay order creation failed after stock was reserved:", err);
+    // Release reserved inventory immediately so stock isn't locked if gateway call failed
+    try {
+      const admin = createAdminClient();
+      await admin
+        .from("orders")
+        .update({ razorpay_order_id: `failed_${order.id}` })
+        .eq("id", order.id);
+      await admin.rpc("fail_razorpay_order", {
+        p_razorpay_order_id: `failed_${order.id}`,
+      });
+    } catch (cleanupErr) {
+      console.error("Failed to release reserved stock after Razorpay error:", cleanupErr);
+    }
     return {
       ok: false,
       error: "We couldn't connect to the payment gateway. Please try again in a moment.",

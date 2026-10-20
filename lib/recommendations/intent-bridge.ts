@@ -8,7 +8,7 @@ export interface IntentPrediction {
   predicted_sub_category: string;
   matched_category: string;
   confidence: number;
-  top_intents: Array<{
+  top_intents?: Array<{
     sub_category: string;
     mehrae_category: string;
     confidence: number;
@@ -24,7 +24,7 @@ const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Predicts user intent from search query and/or browsing history by executing
- * the Python inference bridge with `mehrae_search_model.pkl`.
+ * the Python fashion intent bridge (scripts/predict_intent.py).
  */
 export async function predictSearchIntent(
   query: string = "",

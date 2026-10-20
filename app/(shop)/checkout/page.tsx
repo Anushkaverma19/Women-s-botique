@@ -15,7 +15,10 @@ const FLAT_SHIPPING = 149;
 
 declare global {
   interface Window {
-    Razorpay?: new (options: Record<string, unknown>) => { open: () => void };
+    Razorpay?: new (options: Record<string, unknown>) => {
+      open: () => void;
+      on?: (event: string, callback: (response: unknown) => void) => void;
+    };
   }
 }
 
@@ -65,7 +68,7 @@ const initialForm: FormState = {
 };
 
 export default function CheckoutPage() {
-  const { items, subtotal } = useCart();
+  const { items, subtotal, refresh } = useCart();
   const router = useRouter();
 
   const [form, setForm] = useState<FormState>(initialForm);
@@ -194,12 +197,14 @@ export default function CheckoutPage() {
               razorpaySignature: response.razorpay_signature,
             });
             if (verifyResult.ok && verifyResult.orderId) {
+              await refresh();
               router.push(`/checkout/success?order=${verifyResult.orderId}`);
             } else {
               // The payment may still be genuine even if this fast-path
               // check couldn't confirm it here (e.g. a dropped connection
               // right after paying) - the webhook is the durable backstop
               // that finalizes the order independently of this callback.
+              await refresh();
               router.push("/checkout/success?pending=1");
             }
           } finally {
@@ -218,6 +223,15 @@ export default function CheckoutPage() {
           },
         },
       });
+
+      if (razorpay.on) {
+        razorpay.on("payment.failed", (response: unknown) => {
+          setSubmitting(false);
+          const failure = response as { error?: { description?: string } } | undefined;
+          const reason = failure?.error?.description || "Payment failed at gateway. Please try another payment method.";
+          setSubmitError(reason);
+        });
+      }
 
       razorpay.open();
     } catch (err) {

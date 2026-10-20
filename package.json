@@ -9,8 +9,10 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "provision:demo-admin": "node --env-file=.env.local --experimental-strip-types scripts/provision-demo-admin.ts",
-    "ml:train": "python train_model.py",
-    "ml:serve": "python scripts/predict_intent.py --serve --port 5005"
+    "ml:serve": "python scripts/predict_intent.py --serve --port 5005",
+    "test:razorpay": "node --env-file=.env.local --experimental-strip-types scripts/test-razorpay.ts",
+    "test:ai": "node --env-file=.env.local --experimental-strip-types scripts/test-gemini-ai.ts",
+    "test:knn": "node --env-file=.env.local --experimental-strip-types scripts/test-knn.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

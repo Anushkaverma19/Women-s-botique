@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import type { Category, ProductWithRelations } from "@/types/database";
+import { findKNearestSimilarProducts } from "@/lib/recommendations/knn";
 
 export const PAGE_SIZE = 12;
 
@@ -148,21 +149,37 @@ export async function getFeaturedProducts(limit = 8): Promise<ProductWithRelatio
 
 export async function getRelatedProducts(
   product: ProductWithRelations,
-  limit = 4
+  limit = 5
+): Promise<ProductWithRelations[]> {
+  return getSimilarProducts(product, limit);
+}
+
+/**
+ * Finds the 5 most similar products to the currently viewed product
+ * using K-Nearest Neighbors (KNN) across category, colour, fabric, and price.
+ * Excludes the currently viewed product and returns only active catalogue items.
+ */
+export async function getSimilarProducts(
+  product: ProductWithRelations,
+  limit = 5
 ): Promise<ProductWithRelations[]> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("products")
     .select("*, category:categories(*), images:product_images(*), variants:product_variants(*)")
-    .eq("category_id", product.category_id)
-    .eq("active", true)
-    .neq("id", product.id)
-    .limit(limit);
+    .eq("active", true);
 
-  return ((data ?? []) as unknown as ProductWithRelations[]).map((p) => ({
+  if (error || !data) {
+    console.error("getSimilarProducts error", error?.message);
+    return [];
+  }
+
+  const allProducts = (data as unknown as ProductWithRelations[]).map((p) => ({
     ...p,
     images: [...p.images].sort((a, b) => a.sort_order - b.sort_order),
   }));
+
+  return findKNearestSimilarProducts(product, allProducts, limit);
 }
 
 export async function getCategories(): Promise<Category[]> {

@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { CheckCircle2 } from "lucide-react";
+import { CheckCircle2, Clock } from "lucide-react";
 import { Container } from "@/components/ui/primitives";
 import { LinkButton } from "@/components/ui/button";
 import { getOrderWithItems } from "@/lib/orders/queries";
@@ -10,9 +10,29 @@ export const metadata = { title: "Order Confirmed" };
 export default async function CheckoutSuccessPage({
   searchParams,
 }: {
-  searchParams: Promise<{ order?: string }>;
+  searchParams: Promise<{ order?: string; pending?: string }>;
 }) {
-  const { order: orderId } = await searchParams;
+  const { order: orderId, pending } = await searchParams;
+
+  if (pending) {
+    return (
+      <Container className="py-20 max-w-2xl text-center">
+        <Clock className="mx-auto text-amber-600 mb-6" size={48} />
+        <h1 className="font-display text-4xl mb-3">Payment Processing</h1>
+        <p className="text-charcoal/60 mb-8 leading-relaxed">
+          Your payment was received and is currently being confirmed by the gateway.
+          As soon as verification is complete, your order will be updated in your account.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <LinkButton href="/orders" variant="outline">
+            View My Orders
+          </LinkButton>
+          <LinkButton href="/shop">Continue Shopping</LinkButton>
+        </div>
+      </Container>
+    );
+  }
+
   if (!orderId) notFound();
 
   const order = await getOrderWithItems(orderId);

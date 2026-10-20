@@ -128,6 +128,8 @@ export interface Order {
   shipping_postal_code: string;
   shipping_country: string;
   created_at: string;
+  razorpay_order_id?: string | null;
+  razorpay_payment_id?: string | null;
 }
 
 export interface OrderItem {
