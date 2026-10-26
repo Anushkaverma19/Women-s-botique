@@ -12,14 +12,36 @@ export async function proxy(request: NextRequest) {
     request,
   });
 
-  if (request.nextUrl.pathname.startsWith("/api/") && !request.nextUrl.pathname.startsWith("/api/webhooks/")) {
-    const ip = getClientIp(request);
-    const { success, retryAfter } = await rateLimit(`api:${ip}`, API_LIMIT, API_WINDOW_SECONDS);
-    if (!success) {
-      return NextResponse.json(
-        { error: "Too many requests. Please slow down and try again shortly." },
-        { status: 429, headers: { "Retry-After": String(retryAfter) } }
-      );
+  const pathname = request.nextUrl.pathname;
+  const isWebhook = pathname.startsWith("/api/webhooks/");
+  const isApi = pathname.startsWith("/api/") && !isWebhook;
+  const isServerAction = request.method === "POST" && request.headers.has("next-action");
+
+  // VULN-05 Remediation & Fail-safe protection:
+  // Apply rate limiting to API routes & Server Actions while failing open for critical commerce routes
+  if (isApi || isServerAction) {
+    try {
+      const ip = getClientIp(request);
+      const prefix = isServerAction ? "action" : "api";
+      const { success, retryAfter } = await rateLimit(`${prefix}:${ip}`, API_LIMIT, API_WINDOW_SECONDS);
+
+      if (!success) {
+        // Critical routes: Never block cart or payment transaction flows
+        const isCriticalRoute =
+          pathname.startsWith("/api/cart") ||
+          pathname.startsWith("/api/razorpay/") ||
+          pathname.startsWith("/auth");
+
+        if (!isCriticalRoute) {
+          return NextResponse.json(
+            { error: "Too many requests. Please slow down and try again shortly." },
+            { status: 429, headers: { "Retry-After": String(retryAfter) } }
+          );
+        }
+      }
+    } catch (err) {
+      // Fail-open: Never disrupt traffic on rate limiter failures
+      console.warn("[Proxy] Rate limiter check error, failing open:", err);
     }
   }
 
@@ -38,13 +60,17 @@ export async function proxy(request: NextRequest) {
         return request.cookies.getAll();
       },
       setAll(cookiesToSet) {
-        cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
-        response = NextResponse.next({
-          request,
-        });
-        cookiesToSet.forEach(({ name, value, options }) =>
-          response.cookies.set(name, value, options)
-        );
+        try {
+          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
+          response = NextResponse.next({
+            request,
+          });
+          cookiesToSet.forEach(({ name, value, options }) =>
+            response.cookies.set(name, value, options)
+          );
+        } catch {
+          // Fallback try-catch ensures cookie operations in Edge Middleware/proxy never crash requests
+        }
       },
     },
   });

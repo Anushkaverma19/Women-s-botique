@@ -115,7 +115,7 @@ async function generateWithRetry(
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent(prompt, { signal: AbortSignal.timeout(15000) });
       // Success: reset circuit breaker state
       circuitState = "CLOSED";
       consecutiveTransientFailures = 0;

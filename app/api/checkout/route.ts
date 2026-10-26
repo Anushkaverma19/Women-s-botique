@@ -9,6 +9,15 @@ const FLAT_SHIPPING = 149;
 const FREE_SHIPPING_THRESHOLD = 5000;
 
 export async function POST(request: Request) {
+  // VULN-01 Remediation: Block client-supplied simulated paymentOutcome in production.
+  // All production payments must route through Razorpay SDK.
+  if (process.env.NODE_ENV === "production") {
+    return NextResponse.json(
+      { error: "Direct checkout is disabled in production. Orders must be placed via Razorpay." },
+      { status: 403 }
+    );
+  }
+
   try {
     const profile = await requireUser();
     const body = checkoutSchema.parse(await request.json());

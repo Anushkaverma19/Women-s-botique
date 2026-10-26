@@ -4,6 +4,12 @@ import { createServerClient } from "@supabase/ssr";
 /**
  * Server-side Supabase client for use inside Server Components, Server
  * Actions, and Route Handlers.
+ *
+ * Configured for Next.js 15+ / 16:
+ * - Awaits `cookies()` asynchronously.
+ * - Uses `getAll` and `setAll` for robust chunked auth cookie support across Vercel deployments.
+ * - Wraps `setAll` in a try/catch so invocations within Server Components (where cookie writing
+ *   is disallowed) fail safely without crashing rendering.
  */
 export async function createClient() {
   const cookieStore = await cookies();
@@ -30,7 +36,8 @@ export async function createClient() {
             cookieStore.set(name, value, options);
           });
         } catch {
-          // Called from a Server Component that can't set cookies
+          // The `setAll` method was called from a Server Component or read-only context.
+          // This is expected and safe to ignore when middleware/proxy manages session refresh.
         }
       },
     },

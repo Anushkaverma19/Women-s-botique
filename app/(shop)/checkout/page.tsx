@@ -189,6 +189,7 @@ export default function CheckoutPage() {
           razorpay_payment_id: string;
           razorpay_signature: string;
         }) => {
+          console.log("[Razorpay Dummy Success Handler] Payment response received:", response);
           setSubmitting(true);
           try {
             const verifyResult = await verifyRazorpayPayment({
@@ -196,6 +197,7 @@ export default function CheckoutPage() {
               razorpayPaymentId: response.razorpay_payment_id,
               razorpaySignature: response.razorpay_signature,
             });
+            console.log("[Razorpay Verification Result]:", verifyResult);
             if (verifyResult.ok && verifyResult.orderId) {
               await refresh();
               router.push(`/checkout/success?order=${verifyResult.orderId}`);
@@ -207,6 +209,10 @@ export default function CheckoutPage() {
               await refresh();
               router.push("/checkout/success?pending=1");
             }
+          } catch (verifyErr) {
+            console.error("[Razorpay Verification Error]:", verifyErr);
+            await refresh();
+            router.push("/checkout/success?pending=1");
           } finally {
             setSubmitting(false);
           }
@@ -247,8 +253,15 @@ export default function CheckoutPage() {
       <Container className="py-16">
         <EmptyState
           title="Your bag is waiting."
-          description="Add something to your bag before checking out."
-          action={<LinkButton href="/shop">Explore the Collection</LinkButton>}
+          description="Add something to your bag before checking out, or test the payment modal directly."
+          action={
+            <div className="flex flex-wrap gap-4 justify-center">
+              <LinkButton href="/shop">Explore the Collection</LinkButton>
+              <LinkButton href="/test-payment" variant="outline">
+                Test Razorpay Gateway (Test Mode)
+              </LinkButton>
+            </div>
+          }
         />
       </Container>
     );
@@ -256,7 +269,17 @@ export default function CheckoutPage() {
 
   return (
     <Container className="py-12 max-w-5xl">
-      <h1 className="font-display text-4xl mb-10">Checkout</h1>
+      <div className="flex flex-wrap items-baseline justify-between gap-4 mb-10">
+        <div>
+          <h1 className="font-display text-4xl">Checkout</h1>
+          <p className="text-xs text-charcoal/60 mt-1">
+            Secure checkout powered by Razorpay (Test Mode Active)
+          </p>
+        </div>
+        <LinkButton href="/test-payment" variant="outline" className="text-xs">
+          ⚡ Open Test Payment Console
+        </LinkButton>
+      </div>
       <form onSubmit={handleSubmit} className="grid lg:grid-cols-[1fr_360px] gap-12">
         <div className="space-y-10">
           <section>
@@ -379,8 +402,8 @@ export default function CheckoutPage() {
             </p>
           ) : null}
 
-          <Button type="submit" disabled={submitting} className="w-full mt-6">
-            {submitting ? "Processing..." : "Pay Now"}
+          <Button id="razorpay-checkout-btn" type="submit" disabled={submitting} className="w-full mt-6">
+            {submitting ? "Opening Razorpay..." : "Checkout with Razorpay"}
           </Button>
         </div>
       </form>

@@ -9,15 +9,16 @@
  *    shares the same counters.
  *  - An in-memory sliding-window fallback, used automatically when Upstash
  *    isn't configured (e.g. local dev). This only limits requests within a
- *    single running process/instance - fine for one dev server, NOT
- *    sufficient by itself once the app is horizontally scaled across many
- *    server instances, since each instance would track its own counters.
+ *    single running process/instance.
  *
- * At ~10k concurrent users, plug in Upstash (or any shared store) by
- * setting the two env vars below - no code changes required.
+ * Fail-safe & Resilient Architecture:
+ *  - Upstash Redis timeouts (via 1500ms AbortSignal) and HTTP 404 / 5xx errors
+ *    are caught cleanly.
+ *  - Fails open (allows the request) so rate-limiter downtime or upstream network hiccups
+ *    never block valid user authentication, cart queries, or payment API routes.
  */
 
-interface RateLimitResult {
+export interface RateLimitResult {
   success: boolean;
   limit: number;
   remaining: number;
@@ -50,13 +51,12 @@ async function limitWithUpstash(
   limit: number,
   windowSeconds: number
 ): Promise<RateLimitResult> {
-  // Fixed-window counter implemented with two Redis commands via the
-  // Upstash REST pipeline endpoint: INCR then, only on the first hit in the
-  // window, EXPIRE. This keeps it to a single round trip.
+  const baseUrl = UPSTASH_URL?.replace(/\/+$/, "");
+  const endpoint = `${baseUrl}/pipeline`;
   const bucket = Math.floor(Date.now() / (windowSeconds * 1000));
   const redisKey = `ratelimit:${key}:${bucket}`;
 
-  const res = await fetch(`${UPSTASH_URL}/pipeline`, {
+  const res = await fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${UPSTASH_TOKEN}`,
@@ -66,13 +66,29 @@ async function limitWithUpstash(
       ["INCR", redisKey],
       ["EXPIRE", redisKey, String(windowSeconds)],
     ]),
-    // Never let a Redis hiccup block the request indefinitely.
+    // Bounded timeout (1500ms) so Upstash latency never degrades user response times
     signal: AbortSignal.timeout(1500),
   });
 
-  if (!res.ok) throw new Error(`Upstash rate limit request failed: ${res.status}`);
-  const [incrResult] = (await res.json()) as { result: number }[];
-  const count = incrResult.result;
+  if (!res.ok) {
+    throw new Error(`Upstash rate limit request failed: HTTP ${res.status}`);
+  }
+
+  const raw = await res.json();
+  const [incrResult] = (Array.isArray(raw) ? raw : []) as { result?: number | { result?: number } }[];
+
+  let count = 1;
+  if (incrResult) {
+    if (typeof incrResult.result === "number") {
+      count = incrResult.result;
+    } else if (
+      incrResult.result &&
+      typeof incrResult.result === "object" &&
+      typeof (incrResult.result as { result?: number }).result === "number"
+    ) {
+      count = (incrResult.result as { result: number }).result;
+    }
+  }
 
   return {
     success: count <= limit,
@@ -102,9 +118,8 @@ function limitWithMemory(key: string, limit: number, windowSeconds: number): Rat
 
 /**
  * Checks and increments the rate-limit counter for `key`.
- * Fails open (allows the request) if the Upstash backend errors, so a
- * third-party outage never takes the whole site down - it just falls back
- * to no limiting for that request.
+ * Fails open (allows the request) if the Upstash backend times out or errors (e.g. 404 / 500),
+ * guaranteeing third-party Redis latency or downtime never blocks customer transactions.
  */
 export async function rateLimit(
   key: string,
@@ -114,17 +129,60 @@ export async function rateLimit(
   if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
       return await limitWithUpstash(key, limit, windowSeconds);
-    } catch (err) {
-      console.error("Rate limit backend error, failing open:", err);
-      return { success: true, limit, remaining: limit, retryAfter: windowSeconds };
+    } catch (err: unknown) {
+      const isTimeout =
+        err instanceof Error &&
+        (err.name === "TimeoutError" ||
+          err.name === "AbortError" ||
+          err.message.toLowerCase().includes("timeout") ||
+          err.message.toLowerCase().includes("abort"));
+      const isNotFound = err instanceof Error && err.message.includes("404");
+
+      console.warn(
+        `[RateLimit] Upstash Redis ${isTimeout ? "timed out" : isNotFound ? "returned 404" : "error"}. Failing open:`,
+        err instanceof Error ? err.message : err
+      );
+
+      // Fail-open: allow the request so auth, cart, and payment routes remain operational
+      return {
+        success: true,
+        limit,
+        remaining: limit,
+        retryAfter: windowSeconds,
+      };
     }
   }
-  return limitWithMemory(key, limit, windowSeconds);
+
+  try {
+    return limitWithMemory(key, limit, windowSeconds);
+  } catch (err) {
+    console.warn("[RateLimit] In-memory rate limiting fallback error. Failing open:", err);
+    return {
+      success: true,
+      limit,
+      remaining: limit,
+      retryAfter: windowSeconds,
+    };
+  }
 }
 
-/** Best-effort client identifier for anonymous rate limiting. */
+/**
+ * Client identifier for rate limiting.
+ * VULN-07 Remediation: Prioritize trusted, platform-controlled proxy headers
+ * (Cloudflare / Vercel) over generic client-supplied X-Forwarded-For to prevent IP spoofing.
+ */
 export function getClientIp(request: Request): string {
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (cfIp) return cfIp.trim();
+
+  const vercelIp = request.headers.get("x-vercel-forwarded-for");
+  if (vercelIp) return vercelIp.split(",")[0]!.trim();
+
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) return realIp.trim();
+
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) return forwarded.split(",")[0]!.trim();
-  return request.headers.get("x-real-ip") ?? "unknown";
+
+  return "unknown";
 }
