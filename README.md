@@ -258,3 +258,6 @@ For the customer experience, use `/signup` to create a separate customer account
 > **Note:** These credentials are intentionally provided as a demo/evaluation account. They are not application secrets and do not grant access to the Supabase project itself.
 
 No credentials are hardcoded anywhere in this repository. Create your own account at `/signup`, and promote it to admin using the SQL command in **Admin Setup** above.
+
+ < ! - -   C o d e R a b b i t   S e c u r i t y   R e v i e w   T e s t   - - >  
+ 
