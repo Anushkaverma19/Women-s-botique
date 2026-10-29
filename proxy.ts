@@ -4,8 +4,12 @@ import { rateLimit, getClientIp } from "@/lib/rate-limit";
 
 const PROTECTED_PREFIXES = ["/account", "/orders", "/checkout", "/admin"];
 
-const API_LIMIT = 60;
-const API_WINDOW_SECONDS = 60;
+// Route-specific rate limit configurations
+const LIMITS = {
+  auth: { limit: 10, windowSeconds: 60 },
+  checkout: { limit: 15, windowSeconds: 60 },
+  apiDefault: { limit: 60, windowSeconds: 60 },
+};
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({
@@ -17,30 +21,48 @@ export async function proxy(request: NextRequest) {
   const isApi = pathname.startsWith("/api/") && !isWebhook;
   const isServerAction = request.method === "POST" && request.headers.has("next-action");
 
-  // VULN-05 Remediation & Fail-safe protection:
-  // Apply rate limiting to API routes & Server Actions while failing open for critical commerce routes
+  // Tiered rate limiting for API routes & Server Actions
   if (isApi || isServerAction) {
     try {
       const ip = getClientIp(request);
-      const prefix = isServerAction ? "action" : "api";
-      const { success, retryAfter } = await rateLimit(`${prefix}:${ip}`, API_LIMIT, API_WINDOW_SECONDS);
+      let tier = LIMITS.apiDefault;
+      let bucketPrefix = isServerAction ? "action" : "api";
+
+      if (
+        pathname.startsWith("/auth") ||
+        pathname.includes("/login") ||
+        pathname.includes("/signup")
+      ) {
+        tier = LIMITS.auth;
+        bucketPrefix = "auth";
+      } else if (
+        pathname.startsWith("/api/razorpay/") ||
+        pathname.startsWith("/api/checkout")
+      ) {
+        tier = LIMITS.checkout;
+        bucketPrefix = "checkout";
+      }
+
+      const { success, retryAfter } = await rateLimit(
+        `${bucketPrefix}:${ip}`,
+        tier.limit,
+        tier.windowSeconds
+      );
 
       if (!success) {
-        // Critical routes: Never block cart or payment transaction flows
-        const isCriticalRoute =
-          pathname.startsWith("/api/cart") ||
-          pathname.startsWith("/api/razorpay/") ||
-          pathname.startsWith("/auth");
-
-        if (!isCriticalRoute) {
-          return NextResponse.json(
-            { error: "Too many requests. Please slow down and try again shortly." },
-            { status: 429, headers: { "Retry-After": String(retryAfter) } }
-          );
-        }
+        return NextResponse.json(
+          { error: "Too many requests. Please slow down and try again shortly." },
+          {
+            status: 429,
+            headers: {
+              "Retry-After": String(retryAfter),
+              "X-RateLimit-Limit": String(tier.limit),
+            },
+          }
+        );
       }
     } catch (err) {
-      // Fail-open: Never disrupt traffic on rate limiter failures
+      // Fail-open: Never disrupt traffic on rate limiter network drop
       console.warn("[Proxy] Rate limiter check error, failing open:", err);
     }
   }
@@ -66,7 +88,12 @@ export async function proxy(request: NextRequest) {
             request,
           });
           cookiesToSet.forEach(({ name, value, options }) =>
-            response.cookies.set(name, value, options)
+            response.cookies.set(name, value, {
+              ...options,
+              httpOnly: options?.httpOnly ?? true,
+              sameSite: options?.sameSite ?? "lax",
+              secure: process.env.NODE_ENV === "production",
+            })
           );
         } catch {
           // Fallback try-catch ensures cookie operations in Edge Middleware/proxy never crash requests

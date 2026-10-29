@@ -59,10 +59,16 @@ export async function listProducts(filters: ProductFilters): Promise<ProductList
   }
 
   if (filters.q) {
-    const term = filters.q.trim();
-    query = query.or(
-      `name.ilike.%${term}%,description.ilike.%${term}%,material.ilike.%${term}%,color_family.ilike.%${term}%`
-    );
+    const sanitizedTerm = filters.q
+      .replace(/[,()'"\\%]/g, " ")
+      .trim()
+      .replace(/\s+/g, " ");
+
+    if (sanitizedTerm.length > 0) {
+      query = query.or(
+        `name.ilike.%${sanitizedTerm}%,description.ilike.%${sanitizedTerm}%,material.ilike.%${sanitizedTerm}%,color_family.ilike.%${sanitizedTerm}%`
+      );
+    }
   }
 
   if (filters.color) {

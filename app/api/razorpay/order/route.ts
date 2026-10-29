@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/supabase/auth";
+import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { getCartSummary } from "@/lib/cart/queries";
-import { validateCoupon } from "@/lib/coupons/validate";
 import { getRazorpayClient } from "@/lib/razorpay/client";
 
 const FLAT_SHIPPING = 149;
@@ -9,11 +10,7 @@ const FREE_SHIPPING_THRESHOLD = 5000;
 
 export async function POST(request: Request) {
   try {
-    // VULN-03: Require authenticated user session (stops unauthenticated bot automation)
     const profile = await requireUser();
-
-    // VULN-02: NEVER accept amount from client payload.
-    // Calculate order total authoritatively from server database.
     const body = await request.json().catch(() => ({}));
     const { items, subtotal } = await getCartSummary(profile.id);
 
@@ -25,51 +22,65 @@ export async function POST(request: Request) {
     }
 
     const shipping = subtotal >= FREE_SHIPPING_THRESHOLD ? 0 : FLAT_SHIPPING;
-    let discount = 0;
+    const rpcItems = items.map((i) => ({
+      variant_id: i.variant_id,
+      quantity: i.quantity,
+    }));
 
-    if (body.couponCode && typeof body.couponCode === "string" && body.couponCode.trim()) {
-      const couponResult = await validateCoupon(body.couponCode.trim(), subtotal);
-      if (couponResult.valid && couponResult.discountAmount) {
-        discount = couponResult.discountAmount;
-      }
-    }
-
-    const finalAmountInRupees = Math.max(1, subtotal - discount + shipping);
-    const amountInPaise = Math.round(finalAmountInRupees * 100);
-
-    const razorpay = getRazorpayClient();
-    const order = await razorpay.orders.create({
-      amount: amountInPaise,
-      currency: "INR",
-      receipt: `rcpt_${Date.now()}`,
-      notes: {
-        user_id: profile.id,
-        user_email: profile.email || "",
-      },
+    // 1. Reserve stock and create pending order row in PostgreSQL
+    const supabase = await createClient();
+    const { data: order, error: rpcError } = await supabase.rpc("create_razorpay_order", {
+      p_user_id: profile.id,
+      p_items: rpcItems,
+      p_coupon_code: body.couponCode || null,
+      p_shipping: shipping,
+      p_customer_name: body.customerName || profile.full_name || "Valued Customer",
+      p_customer_email: body.customerEmail || profile.email || "",
+      p_customer_phone: body.customerPhone || "0000000000",
+      p_shipping_address: body.shippingAddress || "Pending address",
+      p_shipping_city: body.shippingCity || "Pending city",
+      p_shipping_state: body.shippingState || "Pending state",
+      p_shipping_postal_code: body.shippingPostalCode || "000000",
+      p_shipping_country: body.shippingCountry || "India",
     });
 
-    const keyId =
-      process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
+    if (rpcError || !order) {
+      return NextResponse.json(
+        { ok: false, error: rpcError?.message ?? "Inventory reservation failed." },
+        { status: 400 }
+      );
+    }
+
+    // 2. Authoritative server amount calculation
+    const amountInPaise = Math.round(order.total * 100);
+    const razorpay = getRazorpayClient();
+    const razorpayOrder = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: order.order_number,
+      notes: { mehrae_order_id: order.id, user_id: profile.id },
+    });
+
+    // 3. Link Razorpay order ID to the database row
+    const admin = createAdminClient();
+    await admin
+      .from("orders")
+      .update({ razorpay_order_id: razorpayOrder.id })
+      .eq("id", order.id);
 
     return NextResponse.json({
       ok: true,
       orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      receipt: order.receipt,
-      status: order.status,
-      keyId,
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      receipt: razorpayOrder.receipt,
+      keyId: process.env.RAZORPAY_KEY_ID || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
     });
   } catch (error: unknown) {
     console.error("Error creating Razorpay order:", error);
     const message = error instanceof Error ? error.message : "Failed to create Razorpay order.";
     const status = message.includes("Authentication required") ? 401 : 500;
-    return NextResponse.json(
-      {
-        ok: false,
-        error: message,
-      },
-      { status }
-    );
+    return NextResponse.json({ ok: false, error: message }, { status });
   }
 }

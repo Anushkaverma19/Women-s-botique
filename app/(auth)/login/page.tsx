@@ -1,124 +1,216 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { loginSchema } from "@/lib/validations/schemas";
-import { Container } from "@/components/ui/primitives";
-import { Input, Label, FieldError } from "@/components/ui/field";
-import { Button } from "@/components/ui/button";
 
-export default function LoginPage() {
+function LoginForm() {
   const searchParams = useSearchParams();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [errors, setErrors] = useState<Record<string, string>>({});
   const urlError = searchParams.get("error");
-  const initialError =
+  const [formError, setFormError] = useState(
     urlError === "auth_callback_failed"
-      ? "Verification link expired or invalid. Please sign in directly or request a new link."
-      : null;
-  const [formError, setFormError] = useState<string | null>(initialError);
+      ? "Verification link expired or invalid. Please sign in or request a new link."
+      : ""
+  );
   const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setFormError(null);
-    setErrors({});
+  const fillCustomerDemo = () => {
+    setEmail("customer@mehrae.com");
+    setPassword("Customer@123");
+    setFormError("");
+  };
 
-    const parsed = loginSchema.safeParse({ email, password });
+  const fillAdminDemo = () => {
+    setEmail("admin@mehrae.com");
+    setPassword("Admin@123");
+    setFormError("");
+  };
+
+  async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setFormError("");
+
+    const parsed = loginSchema.safeParse({
+      email,
+      password,
+    });
+
     if (!parsed.success) {
-      const fieldErrors: Record<string, string> = {};
-      for (const issue of parsed.error.issues) {
-        const key = issue.path[0];
-        if (typeof key === "string") fieldErrors[key] = issue.message;
-      }
-      setErrors(fieldErrors);
+      setFormError(
+        parsed.error.issues[0]?.message ||
+          "Please enter a valid email and password."
+      );
       return;
     }
 
     setLoading(true);
+
     try {
       const supabase = createClient();
-      const { data, error } = await supabase.auth.signInWithPassword(parsed.data);
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: parsed.data.email,
+        password: parsed.data.password,
+      });
 
       if (error) {
-        setLoading(false);
-        const msg = error.message ? error.message.toLowerCase() : "";
-        if (
-          error.code === "email_not_confirmed" ||
-          msg.includes("email not confirmed")
-        ) {
-          setFormError(
-            "Please verify your email address before signing in. Check your inbox for the confirmation link."
-          );
-        } else if (
-          error.status === 429 ||
-          msg.includes("too many requests") ||
-          msg.includes("rate limit")
-        ) {
-          setFormError(
-            "Too many sign-in attempts. Please wait a minute and try again."
-          );
-        } else if (
-          error.code === "invalid_credentials" ||
-          msg.includes("invalid login credentials")
-        ) {
-          setFormError("Incorrect email or password. Please try again.");
-        } else {
-          setFormError(error.message || "Failed to sign in. Please try again.");
-        }
+        console.error("Supabase login error:", error.message);
+        setFormError(error.message);
         return;
       }
 
-      if (data?.session) {
-        // Ensure session state is active before triggering page navigation
-        await supabase.auth.getSession();
+      if (!data.user || !data.session) {
+        setFormError("Login was not completed. Please try again.");
+        return;
       }
 
-      setLoading(false);
+      const redirectTo = searchParams.get("redirectTo");
+      const safeRedirect =
+        redirectTo &&
+        redirectTo.startsWith("/") &&
+        !redirectTo.startsWith("//")
+          ? redirectTo
+          : "/account";
 
-      const redirectTo = searchParams.get("redirectTo") || "/account";
-      window.location.assign(redirectTo);
-    } catch (err: unknown) {
-      setLoading(false);
+      window.location.replace(safeRedirect);
+    } catch (error) {
+      console.error("Login error:", error);
       setFormError(
-        err instanceof Error ? err.message : "An unexpected error occurred during sign in."
+        error instanceof Error
+          ? error.message
+          : "Something went wrong. Please try again."
       );
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
-    <Container className="py-16 max-w-md">
-      <h1 className="font-display text-4xl mb-2">Welcome Back</h1>
-      <p className="text-charcoal/60 mb-10 text-sm">Sign in to your MEHRAÉ account.</p>
-      <form onSubmit={handleSubmit} className="space-y-5" noValidate>
-        <div>
-          <Label htmlFor="email">Email</Label>
-          <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          <FieldError>{errors.email}</FieldError>
-        </div>
-        <div>
-          <Label htmlFor="password">Password</Label>
-          <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
-          <FieldError>{errors.password}</FieldError>
-        </div>
-        {formError ? (
-          <p role="alert" className="text-xs text-burgundy">
+    <main className="flex min-h-screen items-center justify-center px-4 py-12">
+      <form
+        onSubmit={handleLogin}
+        className="w-full max-w-md space-y-5 rounded-xl border border-gray-200 bg-white p-6 sm:p-8 shadow-sm"
+      >
+        <h1 className="text-2xl font-semibold tracking-tight text-gray-900">
+          Welcome Back
+        </h1>
+
+        <p className="text-sm text-gray-500">
+          Sign in to your MEHRAÉ account.
+        </p>
+
+        {formError && (
+          <p
+            role="alert"
+            className="rounded-md bg-red-50 p-3 text-sm text-red-700"
+          >
             {formError}
           </p>
-        ) : null}
-        <Button type="submit" disabled={loading} className="w-full">
-          {loading ? "Signing In..." : "Sign In"}
-        </Button>
+        )}
+
+        <div className="space-y-2">
+          <label
+            htmlFor="email"
+            className="block text-sm font-medium text-gray-700"
+          >
+            Email
+          </label>
+
+          <input
+            id="email"
+            type="email"
+            autoComplete="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="Enter your email"
+            required
+            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-black focus:outline-none focus:ring-1 focus:ring-black"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <label
+            htmlFor="password"
+            className="block text-sm font-medium text-gray-700"
+          >
+            Password
+          </label>
+
+          <input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="Enter your password"
+            required
+            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-black focus:outline-none focus:ring-1 focus:ring-black"
+          />
+        </div>
+
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full rounded-md bg-black px-4 py-3 text-sm font-medium text-white transition hover:bg-black/90 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {loading ? "Signing in..." : "Sign In"}
+        </button>
+
+        {/* Demo Credentials Helper Box */}
+        <div className="mt-6 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="font-semibold text-gray-800 uppercase tracking-wider text-[11px]">
+              Demo Credentials
+            </span>
+            <span className="text-gray-400 text-[10px]">Instant fill</span>
+          </div>
+          <p className="text-gray-500 mb-3 text-xs leading-relaxed">
+            Select a demo profile to test buyer checkout or admin management:
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={fillCustomerDemo}
+              className="flex items-center justify-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 shadow-sm transition hover:bg-gray-100 hover:border-gray-300 active:scale-[0.98]"
+            >
+              <span>🛍️</span> Customer Demo
+            </button>
+            <button
+              type="button"
+              onClick={fillAdminDemo}
+              className="flex items-center justify-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 shadow-sm transition hover:bg-gray-100 hover:border-gray-300 active:scale-[0.98]"
+            >
+              <span>⚡</span> Admin Demo
+            </button>
+          </div>
+        </div>
+
+        <p className="text-center text-xs text-gray-500 mt-4">
+          New to MEHRAÉ?{" "}
+          <Link href="/signup" className="text-black underline underline-offset-4 font-medium">
+            Create an account
+          </Link>
+        </p>
       </form>
-      <p className="text-sm text-charcoal/60 mt-8">
-        New to MEHRAÉ?{" "}
-        <Link href="/signup" className="text-charcoal underline underline-offset-4">
-          Create an account
-        </Link>
-      </p>
-    </Container>
+    </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center">
+          Loading...
+        </main>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }
