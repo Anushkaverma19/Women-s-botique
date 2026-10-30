@@ -54,6 +54,79 @@ export const CATEGORY_SYNONYMS: Record<string, string> = {
   bangle: "jewellery",
 };
 
+export const OUT_OF_SCOPE_PATTERNS = [
+  {
+    category: "footwear (shoes, sandals, heels)",
+    regex: /\b(?:shoes?|footwear|sneakers?|sandals?|heels?|boots?|slippers?|loafers?|flats?|stilettos?)\b/i,
+  },
+  {
+    category: "handbags & luggage",
+    regex: /\b(?:handbags?|bags?|purses?|clutches?|backpacks?|tote\s*bags?|wallets?|luggage|suitcases?)\b/i,
+  },
+  {
+    category: "electronics & gadgets",
+    regex: /\b(?:phones?|iphones?|androids?|smartphones?|laptops?|computers?|macbooks?|tablets?|ipads?|electronics?|tvs?|televisions?|headphones?|earphones?|airpods?|smartwatch(?:es)?|watches|chargers?|cameras?)\b/i,
+  },
+  {
+    category: "cosmetics & beauty products",
+    regex: /\b(?:makeup|cosmetics?|lipsticks?|eyeliners?|foundations?|perfumes?|colognes?|fragrances?|skincare|lotions?|shampoos?)\b/i,
+  },
+  {
+    category: "menswear or kids clothing",
+    regex: /\b(?:menswear|men'?s\s+(?:wear|clothing|suits?|sherwani|kurta)|sherwanis?|kurta\s*pajama|kids?\s*(?:wear|clothing)?|children'?s)\b/i,
+  },
+  {
+    category: "general merchandise",
+    regex: /\b(?:furniture|sofas?|chairs?|cars?|bikes?|motorcycles?|grocer(?:y|ies)|foods?|medicines?|books?|flights?|tickets?|hotels?)\b/i,
+  },
+];
+
+/**
+ * Detects if a user query is asking for non-clothing/unsupported categories.
+ * If the query explicitly asks for boutique offerings (sarees, lehengas, dresses, jewellery),
+ * it is not considered out of scope.
+ */
+export function detectOutOfScopeQuery(message: string): {
+  isOutOfScope: boolean;
+  category?: string;
+} {
+  if (extractCategorySlug(message)) {
+    return { isOutOfScope: false };
+  }
+
+  for (const { category, regex } of OUT_OF_SCOPE_PATTERNS) {
+    if (regex.test(message)) {
+      return { isOutOfScope: true, category };
+    }
+  }
+  return { isOutOfScope: false };
+}
+
+export const INJECTION_PATTERNS = [
+  /ignore\s+(?:all\s+|previous\s+|prior\s+)?instructions/i,
+  /system\s+prompt/i,
+  /developer\s+instructions/i,
+  /you\s+are\s+now/i,
+  /act\s+as\b/i,
+  /jailbreak/i,
+  /dan\s+mode/i,
+  /reveal\s+(?:the\s+|your\s+)?prompt/i,
+  /show\s+(?:the\s+|your\s+)?prompt/i,
+  /print\s+(?:api\s+key|secret|env|prompt)/i,
+  /eval\s*\(/i,
+  /<script/i,
+  /DROP\s+TABLE/i,
+  /SELECT\s+.*?\s+FROM/i,
+  /base64/i,
+];
+
+/**
+ * Detects prompt injection attempts or boundary violations.
+ */
+export function isPromptInjectionQuery(message: string): boolean {
+  return INJECTION_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 /**
  * Parses numeric text with optional Indian or metric multipliers (e.g., '10 lakhs' -> 1000000, '15k' -> 15000).
  */
@@ -76,14 +149,6 @@ export function parsePriceValue(numStr: string, unitStr?: string): number | null
 
 /**
  * Extracts structured numerical min and max price constraints from natural language.
- *
- * Supported formats:
- * - "above 10 lakhs" -> minPrice: 1000000
- * - "under 15k" -> maxPrice: 15000
- * - "between 10k and 20k" -> minPrice: 10000, maxPrice: 20000
- * - "from 15000 to 25000" -> minPrice: 15000, maxPrice: 25000
- * - "more than 50,000", "over 20k", "greater than 30k", "at least 15k", "starting from 15k"
- * - "below 20k", "less than 25k", "up to 30k", "max 40k", "within 20k", "budget 15k"
  */
 export function extractPriceRange(message: string): {
   minPrice: number | null;
@@ -101,7 +166,6 @@ export function extractPriceRange(message: string): {
   if (rangeMatch) {
     let u1 = rangeMatch[2];
     const u2 = rangeMatch[4];
-    // Inherit unit e.g. "10 to 20k" -> u1 is "k"
     if (!u1 && u2 && parseFloat(rangeMatch[1].replace(/,/g, "")) < 1000) {
       u1 = u2;
     }
@@ -109,7 +173,6 @@ export function extractPriceRange(message: string): {
     const val1 = parsePriceValue(rangeMatch[1], u1);
     const val2 = parsePriceValue(rangeMatch[3], u2);
 
-    // Guard against non-price plain numbers (e.g. "size 38 and 40")
     const hasCurrency = /(?:rs\.?|inr|₹)/i.test(rangeMatch[0]);
     const hasUnit = Boolean(u1 || u2);
     const hasPrefix = /(?:between|from|budget|price)/i.test(rangeMatch[0]);
@@ -146,7 +209,6 @@ export function extractPriceRange(message: string): {
     if (targetMatch) {
       const targetVal = parsePriceValue(targetMatch[1], targetMatch[2]);
       if (targetVal !== null) {
-        // Range within ±25% of target
         minPrice = Math.round(targetVal * 0.75);
         maxPrice = Math.round(targetVal * 1.25);
       }
@@ -168,7 +230,6 @@ export function extractOccasion(message: string): string | null {
 
 export function extractColor(message: string): string | null {
   const normalized = message.toLowerCase();
-  // Check exact word boundaries so "red" doesn't match inside "tailored"
   for (const color of COLOR_WORDS) {
     if (new RegExp(`\\b${color}\\b`, "i").test(normalized)) {
       return color;
@@ -204,15 +265,19 @@ const FASHION_KEYWORDS = [
   "dupatta", "fabric", "silk", "cotton", "velvet", "chiffon", "georgette",
   "organza", "crepe", "zari", "embroidery", "wedding", "bridal", "reception",
   "mehendi", "sangeet", "festive", "diwali", "cocktail", "party", "formal",
-  "casual", "price", "under", "budget", "cost", "inr", "rupees", "collection",
-  "wear", "outfit", "attire", "style", "recommend", "show", "buy", "shop",
-  "looking for", "piece", "pieces", "lakh", "lakhs", "crore"
+  "casual", "price", "budget", "cost", "inr", "rupees", "collection",
+  "wear", "outfit", "attire", "style", "recommend", "look",
+  "looking for", "piece", "pieces"
 ];
 
 /**
- * Checks whether user message is asking for products, apparel, or shopping advice.
+ * Checks whether user message is genuinely asking for products, apparel, or shopping advice.
+ * Returns false for prompt injections and out-of-scope non-clothing categories.
  */
 export function isProductRelatedQuery(message: string): boolean {
+  if (isPromptInjectionQuery(message)) return false;
+  if (detectOutOfScopeQuery(message).isOutOfScope) return false;
+
   const norm = message.toLowerCase();
   const priceRange = extractPriceRange(message);
   return (
@@ -227,20 +292,12 @@ export function isProductRelatedQuery(message: string): boolean {
 
 /** Describes what filters were applied and how the results relate to them. */
 export interface RetrievalMeta {
-  /** The filters the user explicitly asked for. */
   requestedColor: string | null;
   requestedCategory: string | null;
   requestedOccasion: string | null;
   requestedMinPrice: number | null;
   requestedMaxPrice: number | null;
-  /**
-   * - "exact": every filter matched.
-   * - "relaxed": some filters were dropped to broaden the search (explained via `relaxedNote`).
-   * - "text": full-text keyword search was used (no explicit filters detected).
-   * - "none": no products matched at all.
-   */
   matchType: "exact" | "relaxed" | "text" | "none";
-  /** Human-readable note explaining how filters were relaxed (only set when matchType === "relaxed" or "none"). */
   relaxedNote: string | null;
 }
 
@@ -251,26 +308,11 @@ export interface RetrievalResult {
 
 /**
  * Core product retrieval for the AI assistant.
- *
- * Strategy:
- * 1. Extract and strictly parse price bounds (minPrice & maxPrice), category, color, and occasion.
- * 2. If a price filter is provided and 0 products in the boutique match that price filter
- *    (e.g., above 10 Lakhs when collection is under 1 Lakh), immediately return
- *    matchType: "none" with:
- *    "We currently don't have products in that price range. Our collection ranges from ₹5,000 to ₹75,000."
- * 3. Color filtering utilizes comprehensive synonym expansion (e.g. green matches emerald, olive, mint).
- * 4. If zero exact matches exist for combined filters (e.g., "green lehenga"), progressively relax:
- *    - color + price across other categories (e.g., green emerald dresses), with explicit context note.
- *    - category + price across other colors, with explicit context note.
- *    - If neither returns results: return matchType: "none" ("No green lehengas found in our collection").
- * 5. NEVER return random fallback products when explicit filters are requested.
  */
 export async function retrieveCandidateProducts(
   message: string,
   limit = 6
 ): Promise<RetrievalResult> {
-  const supabase = await createClient();
-
   const occasion = extractOccasion(message);
   const color = extractColor(message);
   const { minPrice, maxPrice } = extractPriceRange(message);
@@ -286,6 +328,23 @@ export async function retrieveCandidateProducts(
     relaxedNote: null,
   };
 
+  // 1. Guard against prompt injection & out-of-scope queries: do not search database
+  if (isPromptInjectionQuery(message)) {
+    meta.matchType = "none";
+    meta.relaxedNote =
+      "Namaste! I am ASK MEHRAÉ, your personal shopping assistant. I am here exclusively to help you explore and style luxury sarees, lehengas, gowns, and fine jewellery from our collection.";
+    return { products: [], meta };
+  }
+
+  const oos = detectOutOfScopeQuery(message);
+  if (oos.isOutOfScope) {
+    meta.matchType = "none";
+    meta.relaxedNote = `MEHRAÉ specializes exclusively in handcrafted Indian luxury womenswear—including luxury sarees, bespoke bridal & festive lehengas, contemporary gowns, and fine statement jewellery. We do not carry ${oos.category}. Please explore our couture apparel and jewellery collections!`;
+    return { products: [], meta };
+  }
+
+  const supabase = await createClient();
+
   const explicitFilters: string[] = [];
   if (color) explicitFilters.push("color");
   if (categorySlug) explicitFilters.push("category");
@@ -294,8 +353,7 @@ export async function retrieveCandidateProducts(
 
   const hasExplicitFilter = explicitFilters.length > 0;
 
-  // --- 1. Store-wide Price Range Validation ---
-  // If price bounds are specified, verify if ANY active products in the boutique match the price range.
+  // 2. Store-wide Price Range Validation
   if (minPrice !== null || maxPrice !== null) {
     let priceCheck = supabase
       .from("products")
@@ -311,8 +369,6 @@ export async function retrieveCandidateProducts(
 
     const { count: storePriceCount } = await priceCheck;
     if (storePriceCount === 0 || storePriceCount === null) {
-      // Zero products in the boutique match the price filter!
-      // Do NOT display random fallback products.
       meta.matchType = "none";
       meta.relaxedNote =
         "We currently don't have products in that price range. Our collection ranges from ₹5,000 to ₹75,000.";
@@ -320,7 +376,7 @@ export async function retrieveCandidateProducts(
     }
   }
 
-  // --- 2. Resolve category slug to ID once ---
+  // 3. Resolve category slug to ID once
   let categoryId: string | null = null;
   if (categorySlug) {
     const { data: category, error: categoryError } = await supabase
@@ -337,7 +393,7 @@ export async function retrieveCandidateProducts(
     categoryId = category.id;
   }
 
-  // --- Helper: run a strictly filtered query ---
+  // Helper: run a strictly filtered query
   async function runQuery(opts: {
     applyColor?: boolean;
     applyCategory?: boolean;
@@ -357,7 +413,6 @@ export async function retrieveCandidateProducts(
 
     if (opts.applyColor && color) {
       const syns = COLOR_SYNONYMS[color] || [color];
-      // Match color_family and product name for all synonyms
       const orParts = syns
         .flatMap((s) => [`color_family.ilike.%${s}%`, `name.ilike.%${s}%`])
         .join(",");
@@ -382,7 +437,7 @@ export async function retrieveCandidateProducts(
     return (data ?? []) as unknown as ProductWithRelations[];
   }
 
-  // --- Step 1: Exact match with ALL explicit filters ---
+  // Step 1: Exact match with ALL explicit filters
   const exactProducts = await runQuery({
     applyColor: true,
     applyCategory: true,
@@ -395,11 +450,9 @@ export async function retrieveCandidateProducts(
     return { products: sortImages(exactProducts), meta };
   }
 
-  // --- Step 2: Progressive Relaxation Protocol ---
+  // Step 2: Progressive Relaxation Protocol
   if (explicitFilters.length >= 2) {
-    // 2a. Both Color and Category were requested (e.g. "green lehenga")
     if (color && categorySlug) {
-      // Try keeping color + price, dropping category (e.g. green dresses / sarees within budget)
       const colorMatches = await runQuery({
         applyColor: true,
         applyCategory: false,
@@ -413,7 +466,6 @@ export async function retrieveCandidateProducts(
         return { products: sortImages(colorMatches), meta };
       }
 
-      // Try keeping category + price, dropping color (e.g. other lehengas within budget)
       const categoryMatches = await runQuery({
         applyColor: false,
         applyCategory: true,
@@ -427,15 +479,12 @@ export async function retrieveCandidateProducts(
         return { products: sortImages(categoryMatches), meta };
       }
 
-      // Neither returned results
       meta.matchType = "none";
       meta.relaxedNote = `No ${color} ${getCategoryLabel(categorySlug).toLowerCase()} found in our collection. Try exploring our other ${getCategoryLabel(categorySlug).toLowerCase()} or browsing by colour.`;
       return { products: [], meta };
     }
 
-    // 2b. Category + Price requested (e.g. "lehengas under 15k")
     if (categorySlug && (minPrice !== null || maxPrice !== null)) {
-      // Find other items in that price budget
       const budgetAlternatives = await runQuery({
         applyColor: false,
         applyCategory: false,
@@ -454,9 +503,7 @@ export async function retrieveCandidateProducts(
       return { products: [], meta };
     }
 
-    // 2c. Color + Price requested (e.g. "green under 10k")
     if (color && (minPrice !== null || maxPrice !== null)) {
-      // Check any color pieces
       const colorPieces = await runQuery({
         applyColor: true,
         applyCategory: false,
@@ -476,7 +523,7 @@ export async function retrieveCandidateProducts(
     }
   }
 
-  // --- Step 3: Single filter zero-result cases ---
+  // Step 3: Single filter zero-result cases
   if (color && !categorySlug) {
     meta.matchType = "none";
     meta.relaxedNote = `No ${color} pieces found in our collection. Try exploring other colours or browse our full catalogue.`;
@@ -489,8 +536,8 @@ export async function retrieveCandidateProducts(
     return { products: [], meta };
   }
 
-  // --- Step 4: Text keyword search (ONLY if NO explicit filters were detected) ---
-  if (!hasExplicitFilter) {
+  // Step 4: Text keyword search (ONLY if NO explicit filters were detected and query is a genuine shopping query)
+  if (!hasExplicitFilter && isProductRelatedQuery(message)) {
     const words = message
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, " ")
@@ -521,27 +568,9 @@ export async function retrieveCandidateProducts(
         return { products: sortImages(textResults), meta };
       }
     }
-
-    // Last resort for general shopping queries without filters: show featured items
-    if (isProductRelatedQuery(message)) {
-      const { data: featured } = await supabase
-        .from("products")
-        .select(
-          "*, category:categories(*), images:product_images(*), variants:product_variants(*)"
-        )
-        .eq("active", true)
-        .order("featured", { ascending: false })
-        .limit(limit);
-
-      const featuredProducts = (featured ?? []) as unknown as ProductWithRelations[];
-      if (featuredProducts.length > 0) {
-        meta.matchType = "text";
-        return { products: sortImages(featuredProducts), meta };
-      }
-    }
   }
 
-  // --- Step 5: Honest "none" ---
+  // Step 5: Honest "none"
   meta.matchType = "none";
   meta.relaxedNote = "I wasn't able to find matching items in our current collection. Try a different colour, category, or budget.";
   return { products: [], meta };
@@ -556,10 +585,6 @@ function sortImages(products: ProductWithRelations[]): ProductWithRelations[] {
   }));
 }
 
-/**
- * Strips a product down to only what Gemini needs to reason and never leaks
- * internal fields. Trims description for optimal token usage.
- */
 export function toAiContext(product: ProductWithRelations) {
   const inStock = product.variants.some((v) => v.active && v.stock_quantity > 0);
   const compactDescription = (

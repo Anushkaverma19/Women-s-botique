@@ -5,6 +5,8 @@ import {
   retrieveCandidateProducts,
   toAiContext,
   isProductRelatedQuery,
+  isPromptInjectionQuery,
+  detectOutOfScopeQuery,
 } from "@/lib/ai/retrieval";
 import type { RetrievalMeta } from "@/lib/ai/retrieval";
 import {
@@ -57,6 +59,19 @@ export function isQuotaError(err: unknown): boolean {
   );
 }
 
+export function isTimeoutError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const name = err instanceof Error ? err.name : "";
+  return (
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    message.toLowerCase().includes("timeout") ||
+    message.toLowerCase().includes("timed out") ||
+    message.toLowerCase().includes("abort") ||
+    message.toLowerCase().includes("aborted")
+  );
+}
+
 export function isNonRetryableClientError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return (
@@ -79,10 +94,7 @@ export function isTransientError(err: unknown): boolean {
     message.includes("503") ||
     message.includes("504") ||
     message.includes("fetch failed") ||
-    message.toLowerCase().includes("timeout") ||
-    message.toLowerCase().includes("timed out") ||
-    message.toLowerCase().includes("abort") ||
-    message.toLowerCase().includes("aborted") ||
+    isTimeoutError(err) ||
     message.toLowerCase().includes("network") ||
     message.toLowerCase().includes("econnreset") ||
     message.toLowerCase().includes("etimedout")
@@ -180,25 +192,77 @@ function safeParseJson(raw: string): { message?: unknown; recommendations?: unkn
 }
 
 /**
- * Smart Fallback — filter- and budget-aware.
- *
- * When the retrieval returned relaxed/no results, the `meta.relaxedNote` already
- * contains a human-friendly explanation of what was searched and why exact matches
- * weren't found. The fallback message incorporates this so the user sees honest,
- * context-specific messaging instead of generic fallback templates.
+ * High traffic banner required by MEHRAÉ reliability protocol.
  */
-function createSmartFallback(
+const HIGH_TRAFFIC_BANNER =
+  "Our AI Assistant is currently experiencing high traffic. Please try again shortly or explore our featured collection.";
+
+/**
+ * Smart Fallback — filter-, budget-, and scope-aware.
+ *
+ * Rules:
+ * 1. If Gemini returns 429 (Rate Limit / Quota) or times out:
+ *    DO NOT show generic database product fallback grids for prompt injections,
+ *    out-of-scope non-clothing queries, or non-shopping queries.
+ *    Return: "Our AI Assistant is currently experiencing high traffic. Please try again shortly or explore our featured collection."
+ * 2. For non-clothing items (shoes, handbags, electronics) or prompt injection queries:
+ *    DO NOT auto-inject random saree cards unless explicitly relevant.
+ *    Return a helpful text response explaining MEHRAÉ's core boutique offerings.
+ */
+export function createSmartFallback(
   message: string,
   candidates: ProductWithRelations[],
   meta: RetrievalMeta,
-  reason: "quota" | "error" | "no_key"
+  reason: "quota" | "timeout" | "error" | "no_key"
 ): AskMehraeResult {
+  const isInjection = isPromptInjectionQuery(message);
+  const outOfScope = detectOutOfScopeQuery(message);
   const isShopping = isProductRelatedQuery(message);
+  const isQuotaOrTimeout = reason === "quota" || reason === "timeout";
 
-  // --- No candidates at all ---
+  // 1. Quota (429) or Timeout on Injections, Out-of-Scope, or Non-Shopping queries
+  if (isQuotaOrTimeout) {
+    if (
+      isInjection ||
+      outOfScope.isOutOfScope ||
+      !isShopping ||
+      meta.matchType === "none" ||
+      meta.matchType === "text"
+    ) {
+      return {
+        message: HIGH_TRAFFIC_BANNER,
+        recommendations: [],
+      };
+    }
+  }
+
+  // 2. Out-of-Scope non-clothing query handling
+  if (outOfScope.isOutOfScope) {
+    return {
+      message: `MEHRAÉ specializes exclusively in handcrafted Indian luxury womenswear—specifically luxury sarees, bridal & festive lehengas, contemporary gowns, and fine statement jewellery. We do not carry ${outOfScope.category}. Please explore our couture apparel and jewellery collections!`,
+      recommendations: [],
+    };
+  }
+
+  // 3. Prompt injection handling
+  if (isInjection) {
+    return {
+      message:
+        "Namaste! I am ASK MEHRAÉ, your personal shopping assistant. I am here exclusively to help you explore and style luxury sarees, lehengas, gowns, and fine jewellery from our collection. How may I assist your wardrobe today?",
+      recommendations: [],
+    };
+  }
+
+  // 4. No candidates at all
   if (candidates.length === 0) {
     if (meta.matchType === "none" && meta.relaxedNote) {
       return { message: meta.relaxedNote, recommendations: [] };
+    }
+    if (isQuotaOrTimeout) {
+      return {
+        message: HIGH_TRAFFIC_BANNER,
+        recommendations: [],
+      };
     }
     if (reason === "no_key") {
       return {
@@ -210,7 +274,7 @@ function createSmartFallback(
     if (!isShopping) {
       return {
         message:
-          "Our AI styling assistant is currently unavailable due to high demand. Please try asking again shortly, or explore our collections.",
+          "MEHRAÉ specializes exclusively in handcrafted Indian luxury womenswear, including luxury sarees, bridal & festive lehengas, contemporary gowns, and fine jewellery. Tell us what occasion, colour, or style you are looking for!",
         recommendations: [],
       };
     }
@@ -221,11 +285,10 @@ function createSmartFallback(
     };
   }
 
-  // --- We have candidates (exact or relaxed matches) ---
+  // 5. Genuine shopping query with matching candidates
   const topPieces = candidates.slice(0, 3);
   let fallbackMessage = "";
 
-  // If results were relaxed, lead with the relaxation note
   const relaxedPrefix =
     meta.matchType === "relaxed" && meta.relaxedNote ? meta.relaxedNote + " " : "";
 
@@ -238,14 +301,16 @@ function createSmartFallback(
     budgetContext = ` starting from ₹${meta.requestedMinPrice.toLocaleString("en-IN")}`;
   }
 
-  if (reason === "no_key") {
+  if (isQuotaOrTimeout) {
+    fallbackMessage =
+      HIGH_TRAFFIC_BANNER +
+      (budgetContext
+        ? ` Here are pieces from our collection within your requested budget (${budgetContext.trim()}):`
+        : " Here are pieces from our collection tailored to your search:");
+  } else if (reason === "no_key") {
     fallbackMessage =
       relaxedPrefix +
       `Here are pieces from our collection matching your search${budgetContext}. Connect the Gemini API key to enable personalized conversational styling advice.`;
-  } else if (reason === "quota") {
-    fallbackMessage =
-      relaxedPrefix +
-      `Our conversational styling assistant is temporarily taking a breather due to high demand, but here are real pieces from our collection tailored to your search${budgetContext}.`;
   } else {
     fallbackMessage =
       relaxedPrefix +
@@ -263,25 +328,43 @@ function createSmartFallback(
 
 /**
  * The full ASK MEHRAÉ pipeline:
- *   1. Check bounded in-memory cache with user-scope isolation.
- *   2. Rehydrate cached recommendations against live Supabase data.
- *   3. Retrieve compact candidate set from Supabase with strict price and attribute filters.
- *   4. If retrieval returned "none" (e.g. price out of range or no matches), short-circuit immediately.
- *   5. Check circuit breaker state before invoking Gemini.
- *   6. Send context with retrieval metadata to Gemini (gemini-3.8-flash) with 25s timeout.
- *   7. Validate and attach trusted product data, then cache the result.
+ *   1. Check prompt injection and out-of-scope early.
+ *   2. Check bounded in-memory cache with user-scope isolation.
+ *   3. Rehydrate cached recommendations against live Supabase data.
+ *   4. Retrieve compact candidate set with strict price/attribute filters.
+ *   5. If retrieval returned "none", short-circuit immediately.
+ *   6. Check circuit breaker state before invoking Gemini.
+ *   7. Send context with retrieval metadata to Gemini (gemini-3.8-flash) with 25s timeout.
+ *   8. Validate and attach trusted product data, then cache the result.
  */
 export async function askMehrae(
   message: string,
   history: ChatTurn[],
   userScope = "anon"
 ): Promise<AskMehraeResult> {
-  // 1. In-memory cache check
+  // 1. Prompt Injection Early Guard
+  if (isPromptInjectionQuery(message)) {
+    return {
+      message:
+        "Namaste! I am ASK MEHRAÉ, your personal shopping assistant. I am here exclusively to help you explore and style luxury sarees, lehengas, gowns, and fine jewellery from our collection. How may I assist your wardrobe today?",
+      recommendations: [],
+    };
+  }
+
+  // 2. Out-of-Scope Non-Clothing Early Guard
+  const oos = detectOutOfScopeQuery(message);
+  if (oos.isOutOfScope) {
+    return {
+      message: `MEHRAÉ specializes exclusively in handcrafted Indian luxury womenswear—specifically luxury sarees, bespoke bridal & festive lehengas, contemporary gowns, and fine statement jewellery. We do not carry ${oos.category}. Please explore our couture apparel and jewellery collections!`,
+      recommendations: [],
+    };
+  }
+
+  // 3. In-memory cache check
   const cacheKey = buildAiCacheKey(userScope, message, history);
   const cached = getCachedAiResponse(cacheKey, userScope);
 
   if (cached) {
-    // Rehydrate recommendations against live Supabase catalogue
     const rehydrated = await rehydrateCachedRecommendations(cached.recommendations);
     return {
       message: cached.message,
@@ -289,12 +372,18 @@ export async function askMehrae(
     };
   }
 
-  // 2. Retrieve targeted candidates from Supabase (up to 5 items) with strict price/attribute filters
+  // 4. Retrieve targeted candidates from Supabase (up to 5 items)
   const { products: candidates, meta } = await retrieveCandidateProducts(message, 5);
 
-  // 3. Zero-result short-circuit: if the user asked for a budget or specific item and we found nothing,
-  //    return immediately with the explicit message — do NOT burn a Gemini call.
+  // 5. Zero-result short-circuit
   if (meta.matchType === "none" && candidates.length === 0) {
+    // If circuit breaker is open (quota limit exceeded), provide the high traffic banner
+    if (!allowGeminiCall()) {
+      return {
+        message: HIGH_TRAFFIC_BANNER,
+        recommendations: [],
+      };
+    }
     const noneResult: AskMehraeResult = {
       message:
         meta.relaxedNote ||
@@ -310,12 +399,12 @@ export async function askMehrae(
     return createSmartFallback(message, candidates, meta, "no_key");
   }
 
-  // 4. Circuit breaker check
+  // 6. Circuit breaker check
   if (!allowGeminiCall()) {
     return createSmartFallback(message, candidates, meta, "quota");
   }
 
-  // 5. Token-optimized context with complete retrieval metadata
+  // 7. Token-optimized context with complete retrieval metadata
   const context = candidates.map(toAiContext);
   const contextWithMeta = {
     retrievalInfo: {
@@ -349,12 +438,12 @@ export async function askMehrae(
     );
   } catch (err) {
     console.error("Gemini call failed:", err);
-    return createSmartFallback(
-      message,
-      candidates,
-      meta,
-      isQuotaError(err) ? "quota" : "error"
-    );
+    const reason = isQuotaError(err)
+      ? "quota"
+      : isTimeoutError(err)
+      ? "timeout"
+      : "error";
+    return createSmartFallback(message, candidates, meta, reason);
   }
 
   const parsed = safeParseJson(raw);
@@ -383,7 +472,7 @@ export async function askMehrae(
     }
   }
 
-  // 6. Store valid response in bounded cache
+  // 8. Store valid response in bounded cache
   setCachedAiResponse(cacheKey, parsed.message, recommendations, userScope);
 
   return { message: parsed.message, recommendations };
