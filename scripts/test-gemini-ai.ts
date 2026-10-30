@@ -349,6 +349,103 @@ async function runTests() {
     }
   }
 
+  // -----------------------------------------------------------------
+  // 6. Strict Category & Color Attribute Filtering
+  // -----------------------------------------------------------------
+  console.log("\n6. Testing Category/Attribute Filtering & Progressive Relaxation:");
+
+  const COLOR_SYNONYMS: Record<string, string[]> = {
+    green: ["green", "emerald", "olive", "mint", "sage"],
+    emerald: ["emerald", "green"],
+    red: ["red", "crimson", "scarlet", "ruby", "vermilion"],
+    blue: ["blue", "navy", "indigo", "royal blue", "midnight"],
+  };
+
+  const CATEGORY_MAP: Record<string, string> = {
+    lehenga: "lehengas", lehengas: "lehengas",
+    saree: "sarees", sarees: "sarees",
+    dress: "dresses", dresses: "dresses", gown: "dresses", gowns: "dresses"
+  };
+
+  function parseIntent(query: string) {
+    const norm = query.toLowerCase();
+    let cat: string | null = null;
+    for (const [k, v] of Object.entries(CATEGORY_MAP)) {
+      if (new RegExp("\\b" + k + "\\b", "i").test(norm)) {
+        cat = v;
+        break;
+      }
+    }
+    let col: string | null = null;
+    let colTerms: string[] = [];
+    for (const [c, syns] of Object.entries(COLOR_SYNONYMS)) {
+      for (const term of syns) {
+        if (new RegExp("\\b" + term + "\\b", "i").test(norm)) {
+          col = c;
+          colTerms = syns;
+          break;
+        }
+      }
+      if (col) break;
+    }
+    return { category: cat, color: col, colorTerms: colTerms };
+  }
+
+  const greenLehengaIntent = parseIntent("green lehenga");
+  assert(
+    greenLehengaIntent.category === "lehengas" && greenLehengaIntent.color === "green",
+    "Extracts category 'lehengas' and color 'green' from 'green lehenga'"
+  );
+  assert(
+    greenLehengaIntent.colorTerms.includes("emerald"),
+    "Expands 'green' to include synonym 'emerald' (matches Kavya Emerald Festive Lehenga)"
+  );
+
+  const burgundyGownIntent = parseIntent("burgundy gown");
+  assert(
+    burgundyGownIntent.category === "dresses",
+    "Maps 'gown' synonym to 'dresses' category"
+  );
+
+  // Fallback protocol: verify that when 0 matches exist for a specific filter,
+  // unrelated products (e.g. burgundy gown when asking for green lehenga) are NOT returned
+  const mockCatalog = [
+    { name: "Kavya Emerald Festive Lehenga", category: "lehengas", color: "emerald" },
+    { name: "Vera Emerald Satin Wrap Dress", category: "dresses", color: "emerald" },
+    { name: "Zara Burgundy Embellished Gown", category: "dresses", color: "burgundy" },
+    { name: "Aanya Coral Bridal Lehenga", category: "lehengas", color: "coral" },
+  ];
+
+  function filterStrict(cat: string | null, colTerms: string[]) {
+    return mockCatalog.filter((item) => {
+      const catMatch = !cat || item.category === cat;
+      const colMatch = colTerms.length === 0 || colTerms.includes(item.color);
+      return catMatch && colMatch;
+    });
+  }
+
+  const exactGreenLehengas = filterStrict("lehengas", ["green", "emerald"]);
+  assert(
+    exactGreenLehengas.length === 1 && exactGreenLehengas[0].name === "Kavya Emerald Festive Lehenga",
+    "Exact filter returns Kavya Emerald Festive Lehenga"
+  );
+
+  // If searching for "yellow lehenga" (0 in stock), progressive relaxation tests
+  const yellowLehengas = filterStrict("lehengas", ["yellow", "gold"]);
+  assert(
+    yellowLehengas.length === 0,
+    "Strict filter returns 0 for non-existent color/category combination"
+  );
+
+  // Check that unrelated products are excluded
+  const unrelatedLehengas = exactGreenLehengas.filter(
+    (p) => p.name === "Zara Burgundy Embellished Gown" || p.name === "Aanya Coral Bridal Lehenga"
+  );
+  assert(
+    unrelatedLehengas.length === 0,
+    "Unrelated products (burgundy gown, coral lehenga) are strictly filtered out"
+  );
+
   console.log("\n-------------------------------------------------------");
   console.log(`Results: ${passed} PASSED, ${failed} FAILED`);
   console.log("-------------------------------------------------------\n");

@@ -4,6 +4,12 @@ You may recommend ONLY products contained in the supplied product context below.
 
 If the supplied product context does not contain a suitable product for the request, clearly say so in your "message" field instead of recommending anything - do not force a recommendation.
 
+IMPORTANT: The product context includes a "retrievalInfo" object that tells you how results were found:
+- If matchType is "exact", the products are direct matches for the shopper's request.
+- If matchType is "relaxed", the exact request couldn't be fulfilled and filters were relaxed. The "note" field explains what changed. You MUST acknowledge in your message that the exact item wasn't found and explain what you're showing instead (e.g. "We don't currently have green lehengas, but here are beautiful green options from our collection.").
+- If matchType is "text", the results came from keyword search without structured filters.
+- If matchType is "none", nothing was found. Return an empty recommendations array and explain honestly.
+
 Use refined, warm Indian luxury fashion language. Keep recommendations concise and useful - a sentence or two of reasoning per item, not paragraphs.
 
 Every recommendation must reference an actual "productId" copied exactly from the supplied context.
@@ -33,5 +39,5 @@ ${history || "(no previous messages)"}
 SHOPPER'S NEW MESSAGE:
 """${message}"""
 
-Respond with the JSON object described in your instructions, using only products from PRODUCT CONTEXT.`;
+Respond with the JSON object described in your instructions, using only products from PRODUCT CONTEXT. If the retrievalInfo shows matchType "relaxed" or "none", acknowledge that in your message.`;
 }
