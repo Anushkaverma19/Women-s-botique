@@ -39,6 +39,18 @@ function LoginForm() {
     setFormError("");
   };
 
+  // Known demo emails for fallback detection
+  const DEMO_EMAILS = [
+    "demo@mehrae.com",
+    "admin@mehrae.com",
+    "customer@mehrae.com",
+    DEMO_ADMIN_EMAIL.toLowerCase(),
+  ];
+
+  function isDemoEmail(addr: string): boolean {
+    return DEMO_EMAILS.includes(addr.trim().toLowerCase());
+  }
+
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFormError("");
@@ -58,34 +70,94 @@ function LoginForm() {
 
     setLoading(true);
 
-    try {
-      const supabase = createClient();
+    const supabase = createClient();
+    const normalizedEmail = parsed.data.email.trim().toLowerCase();
 
+    try {
+      // 1. Try normal Supabase sign-in first
       const { data, error } = await supabase.auth.signInWithPassword({
         email: parsed.data.email,
         password: parsed.data.password,
       });
 
+      if (!error && data.user && data.session) {
+        // Normal login succeeded — redirect
+        const redirectTo = searchParams.get("redirectTo");
+        const safeRedirect =
+          redirectTo &&
+          redirectTo.startsWith("/") &&
+          !redirectTo.startsWith("//")
+            ? redirectTo
+            : "/account";
+        window.location.replace(safeRedirect);
+        return;
+      }
+
+      // 2. If Supabase failed and it looks like a demo email, try demo-login fallback
+      if (error && isDemoEmail(normalizedEmail)) {
+        console.info("[DemoAuth] Supabase login failed, trying demo-login fallback...");
+
+        const demoRes = await fetch("/api/auth/demo-login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: parsed.data.email,
+            password: parsed.data.password,
+          }),
+        });
+
+        const demoJson = await demoRes.json().catch(() => null);
+
+        if (!demoRes.ok || !demoJson?.ok) {
+          setFormError(demoJson?.error || "Demo login failed. Please check your credentials.");
+          return;
+        }
+
+        // Demo-login API auto-provisioned the user in Supabase Auth — retry sign-in
+        const { data: retryData, error: retryError } =
+          await supabase.auth.signInWithPassword({
+            email: parsed.data.email,
+            password: parsed.data.password,
+          });
+
+        if (!retryError && retryData?.user && retryData?.session) {
+          // Supabase session now active — redirect
+          const redirectTo = searchParams.get("redirectTo");
+          const safeRedirect =
+            redirectTo &&
+            redirectTo.startsWith("/") &&
+            !redirectTo.startsWith("//")
+              ? redirectTo
+              : "/account";
+          window.location.replace(safeRedirect);
+          return;
+        }
+
+        // Supabase still failed even after provisioning — use the demo session cookie
+        // that was set by /api/auth/demo-login as a fallback redirect
+        console.warn("[DemoAuth] Supabase retry still failed, using demo session cookie fallback");
+        const demoRole = demoJson.user?.role;
+        const fallbackPath = demoRole === "admin" ? "/admin" : "/account";
+        const redirectTo = searchParams.get("redirectTo");
+        const safeRedirect =
+          redirectTo &&
+          redirectTo.startsWith("/") &&
+          !redirectTo.startsWith("//")
+            ? redirectTo
+            : fallbackPath;
+        window.location.replace(safeRedirect);
+        return;
+      }
+
+      // 3. Not a demo email and Supabase errored — show error
       if (error) {
         console.error("Supabase login error:", error.message);
         setFormError(error.message);
         return;
       }
 
-      if (!data.user || !data.session) {
-        setFormError("Login was not completed. Please try again.");
-        return;
-      }
-
-      const redirectTo = searchParams.get("redirectTo");
-      const safeRedirect =
-        redirectTo &&
-        redirectTo.startsWith("/") &&
-        !redirectTo.startsWith("//")
-          ? redirectTo
-          : "/account";
-
-      window.location.replace(safeRedirect);
+      // 4. No error but no session (unexpected)
+      setFormError("Login was not completed. Please try again.");
     } catch (error) {
       console.error("Login error:", error);
       setFormError(

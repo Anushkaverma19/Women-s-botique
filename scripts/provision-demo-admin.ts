@@ -3,23 +3,11 @@ import { createClient } from "@supabase/supabase-js";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
-const demoEmail = process.env.DEMO_ADMIN_EMAIL;
-const demoPassword = process.env.DEMO_ADMIN_PASSWORD;
 
 if (!supabaseUrl || !serviceRoleKey) {
   throw new Error(
-    "Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY."
+    "Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SECRET_KEY."
   );
-}
-
-if (!demoEmail || !demoPassword) {
-  throw new Error(
-    "Missing DEMO_ADMIN_EMAIL or DEMO_ADMIN_PASSWORD."
-  );
-}
-
-if (demoPassword.length < 8) {
-  throw new Error("DEMO_ADMIN_PASSWORD must be at least 8 characters.");
 }
 
 const supabase = createClient(supabaseUrl, serviceRoleKey, {
@@ -28,6 +16,34 @@ const supabase = createClient(supabaseUrl, serviceRoleKey, {
     persistSession: false,
   },
 });
+
+interface DemoAccount {
+  email: string;
+  password: string;
+  fullName: string;
+  role: "admin" | "customer";
+}
+
+const DEMO_ACCOUNTS: DemoAccount[] = [
+  {
+    email: process.env.DEMO_ADMIN_EMAIL || "demo@mehrae.com",
+    password: process.env.DEMO_ADMIN_PASSWORD || "MehraeDemo@2026",
+    fullName: "MEHRAÉ Demo Admin",
+    role: "admin",
+  },
+  {
+    email: "admin@mehrae.com",
+    password: "Admin@123",
+    fullName: "MEHRAÉ Administrator",
+    role: "admin",
+  },
+  {
+    email: "customer@mehrae.com",
+    password: "Customer@123",
+    fullName: "MEHRAÉ Demo Customer",
+    role: "customer",
+  },
+];
 
 async function findUserByEmail(email: string) {
   let page = 1;
@@ -47,90 +63,83 @@ async function findUserByEmail(email: string) {
     );
 
     if (user) return user;
-
     if (data.users.length < 100) return null;
-
     page += 1;
   }
 }
 
-async function main() {
-  console.log("Provisioning MEHRAÉ demo admin...");
-
-let user = await findUserByEmail(demoEmail!);
+async function provisionAccount(account: DemoAccount) {
+  console.log(`Provisioning ${account.email} (${account.role})...`);
+  let user = await findUserByEmail(account.email);
 
   if (!user) {
-    console.log("Demo admin does not exist. Creating Auth user...");
-
     const { data, error } = await supabase.auth.admin.createUser({
-      email: demoEmail,
-      password: demoPassword,
+      email: account.email,
+      password: account.password,
       email_confirm: true,
       user_metadata: {
-        full_name: "MEHRAÉ Demo Admin",
+        full_name: account.fullName,
       },
     });
 
     if (error) {
-      throw new Error(`Unable to create demo admin: ${error.message}`);
+      throw new Error(`Unable to create user ${account.email}: ${error.message}`);
     }
 
     user = data.user;
-
     if (!user) {
       throw new Error("Supabase did not return the created user.");
     }
-
-    console.log("Auth user created.");
+    console.log(`  ✓ Auth user created for ${account.email}`);
   } else {
-    console.log("Demo admin already exists. Reusing existing Auth user.");
-
-    // Keep the configured demo password in sync without printing it.
     const { error } = await supabase.auth.admin.updateUserById(user.id, {
-      password: demoPassword,
+      password: account.password,
       email_confirm: true,
     });
 
     if (error) {
-      throw new Error(`Unable to update demo admin: ${error.message}`);
+      throw new Error(`Unable to update user ${account.email}: ${error.message}`);
     }
+    console.log(`  ✓ Password refreshed for ${account.email}`);
   }
 
-  const { error: profileError } = await supabase
-    .from("profiles")
-    .upsert(
-      {
-        id: user.id,
-        email: demoEmail,
-        full_name: "MEHRAÉ Demo Admin",
-        role: "admin",
-      },
-      {
-        onConflict: "id",
-      }
-    );
+  const { error: profileError } = await supabase.from("profiles").upsert(
+    {
+      id: user.id,
+      email: account.email,
+      full_name: account.fullName,
+      role: account.role,
+    },
+    {
+      onConflict: "id",
+    }
+  );
 
   if (profileError) {
-    throw new Error(
-      `Unable to provision admin profile: ${profileError.message}`
-    );
+    throw new Error(`Unable to update profile for ${account.email}: ${profileError.message}`);
   }
 
+  console.log(`  ✓ Profile row confirmed with role '${account.role}'`);
+}
+
+async function main() {
+  console.log("Starting MEHRAÉ demo accounts provisioning...\n");
+
+  for (const account of DEMO_ACCOUNTS) {
+    await provisionAccount(account);
+  }
+
+  console.log("\n==========================================");
+  console.log("✓ All demo accounts provisioned successfully!");
+  console.log("==========================================");
+  for (const acc of DEMO_ACCOUNTS) {
+    console.log(`- ${acc.email} | Password: ${acc.password} | Role: ${acc.role}`);
+  }
   console.log("");
-  console.log("✓ Demo admin provisioned successfully.");
-  console.log(`✓ Login email: ${demoEmail}`);
-  console.log("✓ Password: configured from DEMO_ADMIN_PASSWORD");
-  console.log("✓ Role: admin");
-  console.log("");
-  console.log("Recruiter flow:");
-  console.log("1. Open /login");
-  console.log("2. Sign in with the configured demo admin credentials");
-  console.log("3. Open /admin");
 }
 
 main().catch((error) => {
-  console.error("");
-  console.error("Demo admin provisioning failed.");
+  console.error("\nDemo accounts provisioning failed.");
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });
