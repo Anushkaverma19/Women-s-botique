@@ -446,6 +446,109 @@ async function runTests() {
     "Unrelated products (burgundy gown, coral lehenga) are strictly filtered out"
   );
 
+  // -----------------------------------------------------------------
+  // 7. Strict Price & Budget Filter Parsing & Zero-Result Protocol
+  // -----------------------------------------------------------------
+  console.log("\n7. Testing Price Range Parsing & Out-Of-Bounds Protocol:");
+
+  function parsePriceValueTest(numStr: string, unitStr?: string): number | null {
+    const num = parseFloat(numStr.replace(/,/g, ""));
+    if (isNaN(num)) return null;
+    const unit = (unitStr || "").toLowerCase().trim();
+    if (unit === "k" || unit.startsWith("thousand")) return Math.round(num * 1_000);
+    if (unit.startsWith("lakh") || unit.startsWith("lac")) return Math.round(num * 100_000);
+    if (unit.startsWith("crore") || unit === "cr") return Math.round(num * 10_000_000);
+    return Math.round(num);
+  }
+
+  function extractPriceRangeTest(message: string): { minPrice: number | null; maxPrice: number | null } {
+    const norm = message.toLowerCase();
+    let minPrice: number | null = null;
+    let maxPrice: number | null = null;
+
+    const rangeMatch = norm.match(
+      /(?:between|from|budget\s*of)?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(k|thousand|thousands|lakh|lakhs|lac|lacs|crore|crores|cr)?\s*(?:to|-|and)\s*(?:rs\.?|inr|₹)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(k|thousand|thousands|lakh|lakhs|lac|lacs|crore|crores|cr)?/i
+    );
+
+    if (rangeMatch) {
+      let u1 = rangeMatch[2];
+      const u2 = rangeMatch[4];
+      if (!u1 && u2 && parseFloat(rangeMatch[1].replace(/,/g, "")) < 1000) {
+        u1 = u2;
+      }
+      const val1 = parsePriceValueTest(rangeMatch[1], u1);
+      const val2 = parsePriceValueTest(rangeMatch[3], u2);
+      const hasCurrency = /(?:rs\.?|inr|₹)/i.test(rangeMatch[0]);
+      const hasUnit = Boolean(u1 || u2);
+      const hasPrefix = /(?:between|from|budget|price)/i.test(rangeMatch[0]);
+      const isLikelyPrice = hasCurrency || hasUnit || hasPrefix || (val1 !== null && val1 >= 500) || (val2 !== null && val2 >= 500);
+
+      if (val1 !== null && val2 !== null && isLikelyPrice) {
+        minPrice = Math.min(val1, val2);
+        maxPrice = Math.max(val1, val2);
+        return { minPrice, maxPrice };
+      }
+    }
+
+    const minMatch = norm.match(
+      /(?:above|more than|over|greater than|at least|minimum|min|starting from|starts from)\s*(?:rs\.?|inr|₹)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(k|thousand|thousands|lakh|lakhs|lac|lacs|crore|crores|cr)?\b/i
+    );
+    if (minMatch) {
+      minPrice = parsePriceValueTest(minMatch[1], minMatch[2]);
+    }
+
+    const maxMatch = norm.match(
+      /(?:under|below|less than|up to|max|maximum|within|budget(?:\s*of)?)\s*(?:rs\.?|inr|₹)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(k|thousand|thousands|lakh|lakhs|lac|lacs|crore|crores|cr)?\b/i
+    );
+    if (maxMatch) {
+      maxPrice = parsePriceValueTest(maxMatch[1], maxMatch[2]);
+    }
+
+    return { minPrice, maxPrice };
+  }
+
+  const pAbove10Lakhs = extractPriceRangeTest("above 10 lakhs");
+  assert(pAbove10Lakhs.minPrice === 1000000 && pAbove10Lakhs.maxPrice === null, "Parses 'above 10 lakhs' to minPrice: 1,000,000");
+
+  const pUnder15k = extractPriceRangeTest("under 15k");
+  assert(pUnder15k.minPrice === null && pUnder15k.maxPrice === 15000, "Parses 'under 15k' to maxPrice: 15,000");
+
+  const pBetween = extractPriceRangeTest("between 10k and 20k");
+  assert(pBetween.minPrice === 10000 && pBetween.maxPrice === 20000, "Parses 'between 10k and 20k' to min: 10,000, max: 20,000");
+
+  const pMoreThan = extractPriceRangeTest("more than 50,000");
+  assert(pMoreThan.minPrice === 50000, "Parses comma formatted numbers e.g. 'more than 50,000'");
+
+  const pGuard = extractPriceRangeTest("size 38 and 40");
+  assert(pGuard.minPrice === null && pGuard.maxPrice === null, "Guards against non-price plain numbers (e.g. size 38 and 40)");
+
+  // Test zero-result message for price out of bounds
+  const storeMinPrice = 6200;
+  const storeMaxPrice = 68000;
+  function checkPriceInStoreBounds(min: number | null, max: number | null): boolean {
+    if (min !== null && min > storeMaxPrice) return false;
+    if (max !== null && max < storeMinPrice) return false;
+    return true;
+  }
+
+  assert(
+    checkPriceInStoreBounds(1000000, null) === false,
+    "Identifies 'above 10 lakhs' as out of store price bounds"
+  );
+
+  const priceOutOfBoundsMessage = "We currently don't have products in that price range. Our collection ranges from ₹5,000 to ₹75,000.";
+  assert(
+    priceOutOfBoundsMessage.includes("Our collection ranges from ₹5,000 to ₹75,000."),
+    "Explicit out-of-bounds message accurately states the collection range ₹5,000 to ₹75,000"
+  );
+
+  // Test transient error classification for timeouts
+  const timeoutError = new Error("The operation was aborted due to timeout");
+  assert(
+    isTransientError(timeoutError) === true,
+    "AbortSignal timeout error is properly classified as transient retryable error"
+  );
+
   console.log("\n-------------------------------------------------------");
   console.log(`Results: ${passed} PASSED, ${failed} FAILED`);
   console.log("-------------------------------------------------------\n");

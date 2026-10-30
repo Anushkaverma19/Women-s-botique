@@ -80,8 +80,12 @@ export function isTransientError(err: unknown): boolean {
     message.includes("504") ||
     message.includes("fetch failed") ||
     message.toLowerCase().includes("timeout") ||
+    message.toLowerCase().includes("timed out") ||
+    message.toLowerCase().includes("abort") ||
+    message.toLowerCase().includes("aborted") ||
     message.toLowerCase().includes("network") ||
-    message.toLowerCase().includes("econnreset")
+    message.toLowerCase().includes("econnreset") ||
+    message.toLowerCase().includes("etimedout")
   );
 }
 
@@ -107,6 +111,7 @@ function allowGeminiCall(): boolean {
 /**
  * Calls Gemini with at most ONE retry for transient errors only.
  * Quota errors (429) and invalid credential errors are never retried.
+ * Timeout increased to 25s for resilient handling during network fluctuations.
  */
 async function generateWithRetry(
   model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
@@ -116,7 +121,9 @@ async function generateWithRetry(
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const result = await model.generateContent(prompt, { signal: AbortSignal.timeout(15000) });
+      const result = await model.generateContent(prompt, {
+        signal: AbortSignal.timeout(25000),
+      });
       // Success: reset circuit breaker state
       circuitState = "CLOSED";
       consecutiveTransientFailures = 0;
@@ -142,8 +149,8 @@ async function generateWithRetry(
         }
         throw err;
       }
-      // Retry transient error at most once with bounded backoff & jitter (~300-500ms)
-      await sleep(300 + Math.random() * 200);
+      // Retry transient error at most once with bounded backoff & jitter (~400-600ms)
+      await sleep(400 + Math.random() * 200);
     }
   }
   throw lastError;
@@ -173,12 +180,12 @@ function safeParseJson(raw: string): { message?: unknown; recommendations?: unkn
 }
 
 /**
- * Smart Fallback — now filter-aware.
+ * Smart Fallback — filter- and budget-aware.
  *
  * When the retrieval returned relaxed/no results, the `meta.relaxedNote` already
  * contains a human-friendly explanation of what was searched and why exact matches
  * weren't found. The fallback message incorporates this so the user sees honest,
- * context-specific messaging.
+ * context-specific messaging instead of generic fallback templates.
  */
 function createSmartFallback(
   message: string,
@@ -190,7 +197,6 @@ function createSmartFallback(
 
   // --- No candidates at all ---
   if (candidates.length === 0) {
-    // We know exactly why there are no results via meta
     if (meta.matchType === "none" && meta.relaxedNote) {
       return { message: meta.relaxedNote, recommendations: [] };
     }
@@ -208,9 +214,9 @@ function createSmartFallback(
         recommendations: [],
       };
     }
-    // Generic shopping query with nothing found
     return {
-      message: "I wasn't able to find matching items in our current collection. Try a different colour, category, or browse our full catalogue.",
+      message:
+        "I wasn't able to find matching items in our current collection. Try a different colour, category, or browse our full catalogue.",
       recommendations: [],
     };
   }
@@ -220,19 +226,30 @@ function createSmartFallback(
   let fallbackMessage = "";
 
   // If results were relaxed, lead with the relaxation note
-  const relaxedPrefix = meta.matchType === "relaxed" && meta.relaxedNote
-    ? meta.relaxedNote + " "
-    : "";
+  const relaxedPrefix =
+    meta.matchType === "relaxed" && meta.relaxedNote ? meta.relaxedNote + " " : "";
+
+  let budgetContext = "";
+  if (meta.requestedMinPrice && meta.requestedMaxPrice) {
+    budgetContext = ` between ₹${meta.requestedMinPrice.toLocaleString("en-IN")} and ₹${meta.requestedMaxPrice.toLocaleString("en-IN")}`;
+  } else if (meta.requestedMaxPrice) {
+    budgetContext = ` under ₹${meta.requestedMaxPrice.toLocaleString("en-IN")}`;
+  } else if (meta.requestedMinPrice) {
+    budgetContext = ` starting from ₹${meta.requestedMinPrice.toLocaleString("en-IN")}`;
+  }
 
   if (reason === "no_key") {
-    fallbackMessage = relaxedPrefix +
-      "Here are pieces from our collection matching your search. Connect the Gemini API key to enable personalized conversational styling advice.";
+    fallbackMessage =
+      relaxedPrefix +
+      `Here are pieces from our collection matching your search${budgetContext}. Connect the Gemini API key to enable personalized conversational styling advice.`;
   } else if (reason === "quota") {
-    fallbackMessage = relaxedPrefix +
-      "Our conversational styling assistant is temporarily taking a breather due to high demand, but here are real pieces from our collection tailored to your search.";
+    fallbackMessage =
+      relaxedPrefix +
+      `Our conversational styling assistant is temporarily taking a breather due to high demand, but here are real pieces from our collection tailored to your search${budgetContext}.`;
   } else {
-    fallbackMessage = relaxedPrefix +
-      "We're currently having trouble reaching the full AI styling assistant, but here are curated pieces from our collection matching your request.";
+    fallbackMessage =
+      relaxedPrefix +
+      `We're currently having trouble reaching the full AI styling assistant, but here are curated pieces from our collection matching your request${budgetContext}.`;
   }
 
   return {
@@ -247,11 +264,11 @@ function createSmartFallback(
 /**
  * The full ASK MEHRAÉ pipeline:
  *   1. Check bounded in-memory cache with user-scope isolation.
- *   2. Rehydrate cached recommendations against live Supabase data (ensures up-to-date prices & inventory).
- *   3. If cache miss, check circuit breaker state.
- *   4. Retrieve compact candidate set (top 5) from Supabase with filter metadata.
- *   5. If retrieval returned "none" with explicit filters, short-circuit with honest "not found" response.
- *   6. Send trimmed context + message to Gemini (gemini-3.8-flash) with token limits.
+ *   2. Rehydrate cached recommendations against live Supabase data.
+ *   3. Retrieve compact candidate set from Supabase with strict price and attribute filters.
+ *   4. If retrieval returned "none" (e.g. price out of range or no matches), short-circuit immediately.
+ *   5. Check circuit breaker state before invoking Gemini.
+ *   6. Send context with retrieval metadata to Gemini (gemini-3.8-flash) with 25s timeout.
  *   7. Validate and attach trusted product data, then cache the result.
  */
 export async function askMehrae(
@@ -272,14 +289,16 @@ export async function askMehrae(
     };
   }
 
-  // 2. Retrieve targeted candidates from Supabase (up to 5 items) — now returns metadata
+  // 2. Retrieve targeted candidates from Supabase (up to 5 items) with strict price/attribute filters
   const { products: candidates, meta } = await retrieveCandidateProducts(message, 5);
 
-  // 3. If the user asked for something specific and we found nothing, return early
-  //    with an honest "not found" message — no need to burn a Gemini call.
+  // 3. Zero-result short-circuit: if the user asked for a budget or specific item and we found nothing,
+  //    return immediately with the explicit message — do NOT burn a Gemini call.
   if (meta.matchType === "none" && candidates.length === 0) {
     const noneResult: AskMehraeResult = {
-      message: meta.relaxedNote || "I wasn't able to find any matching items in our current collection. Try a different colour, category, or price range.",
+      message:
+        meta.relaxedNote ||
+        "I wasn't able to find any matching items in our current collection. Try a different colour, category, or price range.",
       recommendations: [],
     };
     setCachedAiResponse(cacheKey, noneResult.message, noneResult.recommendations, userScope);
@@ -296,14 +315,16 @@ export async function askMehrae(
     return createSmartFallback(message, candidates, meta, "quota");
   }
 
-  // 5. Token-optimized context — include retrieval metadata so Gemini knows
-  //    whether results are exact or relaxed and can phrase its response accordingly.
+  // 5. Token-optimized context with complete retrieval metadata
   const context = candidates.map(toAiContext);
   const contextWithMeta = {
     retrievalInfo: {
       matchType: meta.matchType,
       requestedColor: meta.requestedColor,
       requestedCategory: meta.requestedCategory,
+      requestedOccasion: meta.requestedOccasion,
+      requestedMinPrice: meta.requestedMinPrice,
+      requestedMaxPrice: meta.requestedMaxPrice,
       note: meta.relaxedNote,
     },
     products: context,
